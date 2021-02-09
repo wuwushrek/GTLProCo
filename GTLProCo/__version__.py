@@ -1,0 +1,8 @@
+__title__ = 'GTLProCo'
+__description__ = 'Python library for control of swarm subject to graph temporal logic specifications'
+__url__ = 'https://github.com/wuwushrek/GTLProCo'
+__version__ = '0.1'
+__author__ = 'Franck Djeumou'
+__author_email__ = 'frmbouwe@gmail.com'
+__license__ = 'GNU 3.0'
+__copyright__ = 'Copyright 2020 Franck Djeumou'
