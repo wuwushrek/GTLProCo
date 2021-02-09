@@ -1,2 +1,9 @@
-# GTLProco
-Journal paper on Probabilistic Control of Heteregeneous Swarms Subject to Graph Temporal Logic Specifications: A Decentralized and Scalable Algorithm
+| Title      | Probabilistic Control of Heteregeneous Swarms Subject to Graph Temporal Logic Specifications: A Decentralized and Scalable Algorithm                  |
+|------------|----------------------------------------------------------------------------------------------|
+| Authors    | Franck Djeumou, Zhe Xu, and Ufuk Topcu                                                |
+| Journal |  IEEE Transactions on Control of Network Systems                                                            |
+
+## Abstract
+
+We develop a probabilistic control algorithm, GTLProco, for swarm of heterogeneous agents subject to high-level task specifications. The resulting algorithm not only achieves decentralized control of the swarm but also significantly improves scalability over state-of-the-art existing algorithms. Specifically, we study a setting in which the agents move along the nodes of a graph, and the high-level task specifications for the swarm are expressed in a recently proposed language called graph temporal logic (GTL). By constraining the distribution of the swarm over the nodes of the graph, GTL specifies a wide range of properties, including safety, progress, and response. \controlalgo{}, agnostic to the number of agents comprising the swarm, controls in a decentralized and probabilistic manner a collective property of the swarm: its density distribution. To this end, it synthesizes a time-varying Markov chain modeling the time evolution of the density distribution under the GTL constraints. We first identify a subset of GTL for which the synthesis of such Markov chain can be formulated as a linear program. Then, in the general case, we formulate the synthesis of such a Markov chain as a mixed-integer nonlinear program (MINLP). We exploit the structure of the problem to provide an efficient sequential mixed-integer linear programming scheme with trust region to approximate the solutions of the MINLP. We evaluate the algorithm in several scenarios, including a search and rescue mission in a high-fidelity ROS-Gazebo simulation, and a disease control case study.
+
