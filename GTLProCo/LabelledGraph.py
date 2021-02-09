@@ -116,10 +116,9 @@ class LabelledGraph:
 
     def getLabelMatRepr(self, nodeName):
         """
+        Return a matrix representation of the label of nodeName
         """
-        assert nodeName in self.V and nodeName in self.nLabelsRepr,\
-                "Node {} is not present in either the graph or has not been labelled yet".format(nodeName)
-        return self.nLabelsRepr[nodeName]
+        return self.nLabelsRepr.get(nodeName, None)
 
     def getMatReprNodeLabel(self, nodeLabel):
         """
