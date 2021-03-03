@@ -120,6 +120,14 @@ class LabelledGraph:
         """
         return self.nLabelsRepr.get(nodeName, None)
 
+    def getRprDensity(self):
+        dictRes = {}
+        for s in self.eSubswarm.keys():
+            for n in self.V:
+                dictRes[(s,n)] = getattr(self, 'x_{}_{}'.format(s,n))
+        return dictRes
+
+
     def getMatReprNodeLabel(self, nodeLabel):
         """
         Return a matrix representation of the constraints given by nodeLabel
@@ -195,10 +203,13 @@ if __name__ == "__main__":
     # Add the subswarm with id 1
     lG.addSubswarm(1, [(1,2), (2,3), (2,1), (3,2)])
 
+    # Get the density symbolic representation for defining the node labels
+    x = lG.getRprDensity()
+
     # Now add some node label on the graph
-    lG.addNodeLabel(1, lG.x_0_1 + lG.x_0_2)
-    lG.addNodeLabel(2, lG.x_0_1 + lG.x_1_1)
-    lG.addNodeLabel(3, [lG.x_0_1 + lG.x_0_2, lG.x_0_3 - lG.x_1_2])
+    lG.addNodeLabel(1, x[(0,1)] + x[(0,2)])
+    lG.addNodeLabel(2, x[(0,1)] + x[(1,1)])
+    lG.addNodeLabel(3, [x[(0,1)] + x[(0,2)], x[(0,3)] - x[(1,2)]])
 
     # Print the graph representation
     print(lG)
