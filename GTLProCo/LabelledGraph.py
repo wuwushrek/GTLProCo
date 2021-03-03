@@ -159,8 +159,8 @@ class LabelledGraph:
                 # Add the coefficients to the list
                 cList.append(cV)
                 iList.append(indexV)
-            coeffList.extend(cList)
-            indexList.extend(iList)
+            coeffList.append(cList)
+            indexList.append(iList)
         return (coeffList, indexList)
 
     def __repr__(self):
@@ -181,3 +181,28 @@ class LabelledGraph:
         for key, value in self.nLabels.items():
             s9 = s9 + "  Label of the node {} is {}\n".format(key, value)
         return s0 + s1 + s7 + s8 + s2 + s3 + s4 + s5 + s6 + s9
+
+if __name__ == "__main__":
+    """
+    Example of utilization of this class
+    """
+    V = set({1, 2, 3})
+    lG = LabelledGraph(V)
+
+    # Add the subswarm with id 1
+    lG.addSubswarm(0, [(1,2), (2,3), (2,1), (3,2)])
+
+    # Add the subswarm with id 1
+    lG.addSubswarm(1, [(1,2), (2,3), (2,1), (3,2)])
+
+    # Now add some node label on the graph
+    lG.addNodeLabel(1, lG.x_0_1 + lG.x_0_2)
+    lG.addNodeLabel(2, lG.x_0_1 + lG.x_1_1)
+    lG.addNodeLabel(3, [lG.x_0_1 + lG.x_0_2, lG.x_0_3 - lG.x_1_2])
+
+    # Print the graph representation
+    print(lG)
+
+    # Print the matrix representation of a node label
+    print ('Label node {}: {}'.format(3, lG.getNodeLabel(3)))
+    print ("Label representation node {}: {}".format(3, lG.getLabelMatRepr(3)))
