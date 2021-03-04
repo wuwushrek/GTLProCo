@@ -1,7 +1,7 @@
 | Title      | Probabilistic Control of Heteregeneous Swarms Subject to Graph Temporal Logic Specifications: A Decentralized and Scalable Algorithm                  |
 |------------|----------------------------------------------------------------------------------------------|
 | Authors    | Franck Djeumou, Zhe Xu, and Ufuk Topcu                                                |
-| Journal |  IEEE Transactions on Control of Network Systems                                                            |
+| Journal |  IEEE Transactions on Automatic Control                                                            |
 
 ## Abstract
 
