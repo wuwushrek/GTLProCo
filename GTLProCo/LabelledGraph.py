@@ -118,6 +118,7 @@ class LabelledGraph:
         """
         Return a matrix representation of the label of nodeName
         """
+        assert nodeName in self.nLabelsRepr
         return self.nLabelsRepr.get(nodeName, None)
 
     def getRprDensity(self):
