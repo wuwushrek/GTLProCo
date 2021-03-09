@@ -1,51 +1,111 @@
 import numpy as np
 from .LabelledGraph import LabelledGraph
 from abc import ABC, abstractmethod
+import itertools
 
 STRICT_INEQ = 1e-8
 BIG_M = 1e3
 N_VARS = 0
 BOOL_VAR = -1
 
-# def and_op(bVars):
-# 	global BOOL_VAR, N_VARS
+def get_neighbors(lG, node, k):
+	"""
+		Get the set of subset of nodes at distance k from current node
+		:param lG : labelled graph
+		:param node : the node at which to evaluate the GTL formula
+		:param k : Distance to the node in term of edges
+	"""
+	Edge = lG.getGlobalEdgeSet()
+	if k == 1:
+		resNode = set()
+		for (s1, s2) in Edge:
+			if s1 == node:
+				resNode.add(s2)
+			if s2 == node:
+				resNode.add(s1)
+		return resNode
+	res = get_neighbors(lG, node, k-1)
+	nRes = set()
+	for s in res:
+		for (s1, s2) in Edge:
+			if s1 == s:
+				nRes.append(s2)
+			if s2 == s:
+				nRes.append(s1)
+	return nRes
 
-# 	# Create the variable storing the result of the feasibility of this formula
-# 	nVar = (N_VARS, BOOL_VAR-1) # -1 means it is a boolean var and -2 means it is not
-# 	N_VARS += 1	# Increment the number of new variables
 
-# 	# Get the number of propositions in the AND operation
-# 	nProp = len(bVars)
+def and_op(bVars):
+	""" 
+		Perform and AND operation between multiple variables
+	"""
+	global BOOL_VAR, N_VARS
 
-# 	# Save the new constrainrs
-# 	newCoeffs = list()
-# 	newVars = list()
-# 	rhsVal = list()
+	# Create the variable storing the result of the feasibility of this formula
+	nVar = (N_VARS, BOOL_VAR-1) # -1 means it is a boolean var and -2 means it is not
+	N_VARS += 1	# Increment the number of new variables
 
-# 	# Get the MILP representation using the array repr of the linear label
-# 	tContr = list()
-# 	tCoeff =  list()
-# 	for varT in bVars:
-# 		newCoeffs.extend(nCoeffs)
-# 		newVars.extend(nVars)
-# 		rhsVals.extend(rhsVs)
-# 		timeVal.extend(tVal)
-# 		# Add the constraint by the and operator
-# 		newCoeffs.append([1, -1])
-# 		newVars.append([nVar, fEval])
-# 		rhsVals.append(0)
-# 		timeVal.append(t)
-# 		# Add the binding constraints of the result of each prop
-# 		tContr.append(fEval)
-# 		tCoeff.append(1)
-# 	tContr.append(nVar)
-# 	tCoeff.append(-1)
-# 	# Add the last constraint
-# 	newCoeffs.append(tCoeff)
-# 	newVars.append(tContr)
-# 	rhsVals.append(nProp-1)
-# 	timeVal.append(t)
-# 	return newCoeffs, newVars, rhsVals, nVar, timeVal
+	# Get the number of propositions in the AND operation
+	nProp = len(bVars)
+
+	# Save the new constrainrs
+	newCoeffs = list()
+	newVars = list()
+	rhsVals = list()
+
+	# Get the MILP representation using the array repr of the linear label
+	tContr = list()
+	tCoeff =  list()
+	for varT in bVars:
+		newCoeffs.append([1, -1])
+		newVars.append([nVar, varT])
+		rhsVals.append(0)
+		# Add the binding constraints of the result of each prop
+		tContr.append(varT)
+		tCoeff.append(1)
+	tContr.append(nVar)
+	tCoeff.append(-1)
+	# Add the last constraint
+	newCoeffs.append(tCoeff)
+	newVars.append(tContr)
+	rhsVals.append(nProp-1)
+	return newCoeffs, newVars, rhsVals, nVar
+
+def or_op(bVars):
+	""" 
+		Perform and OR operation between multiple variables
+	"""
+	global BOOL_VAR, N_VARS
+
+	# Create the variable storing the result of the feasibility of this formula
+	nVar = (N_VARS, BOOL_VAR-1) # -1 means it is a boolean var and -2 means it is not
+	N_VARS += 1	# Increment the number of new variables
+
+	# Get the number of propositions in the AND operation
+	nProp = len(bVars)
+
+	# Save the new constrainrs
+	newCoeffs = list()
+	newVars = list()
+	rhsVals = list()
+
+	# Get the MILP representation using the array repr of the linear label
+	tContr = list()
+	tCoeff =  list()
+	for varT in bVars:
+		newCoeffs.append([-1, 1])
+		newVars.append([nVar, varT])
+		rhsVals.append(0)
+		# Add the binding constraints of the result of each prop
+		tContr.append(varT)
+		tCoeff.append(-1)
+	tContr.append(nVar)
+	tCoeff.append(1)
+	# Add the last constraint
+	newCoeffs.append(tCoeff)
+	newVars.append(tContr)
+	rhsVals.append(0)
+	return newCoeffs, newVars, rhsVals, nVar
 
 def eval_formula(self, graphTraj, formula, lG, node):
 	"""
@@ -230,15 +290,6 @@ class AndGTL(GTLFormula):
 			:param t : the time index at which the formula must be true
 			:param Kp :  the graph trajectory length cycle
 		"""
-		global N_VARS, BIG_M, STRICT_INEQ, BOOL_VAR
-
-		# Create the variable storing the result of the feasibility of this formula
-		nVar = (N_VARS, BOOL_VAR-1) # -1 means it is a boolean var and -2 means it is not
-		N_VARS += 1	# Increment the number of new variables
-
-		# Get the number of propositions in the AND operation
-		nProp = len(self.mFormula)
-
 		# Save the new constrainrs
 		newCoeffs = list()
 		newVars = list()
@@ -246,29 +297,20 @@ class AndGTL(GTLFormula):
 		timeVal = list()
 
 		# Get the MILP representation using the array repr of the linear label
-		tContr = list()
-		tCoeff =  list()
+		varsAnd = list()
 		for gtl in self.mFormula:
 			nCoeffs, nVars, rhsVs, fEval, tVal = gtl.milp_repr(lG, node, t, Kp)
 			newCoeffs.extend(nCoeffs)
 			newVars.extend(nVars)
 			rhsVals.extend(rhsVs)
 			timeVal.extend(tVal)
-			# Add the constraint by the and operator
-			newCoeffs.append([1, -1])
-			newVars.append([nVar, fEval])
-			rhsVals.append(0)
-			timeVal.append(t)
-			# Add the binding constraints of the result of each prop
-			tContr.append(fEval)
-			tCoeff.append(1)
-		tContr.append(nVar)
-		tCoeff.append(-1)
+			varsAnd.append(fEval)
+		nCoeffs, nVars, rVals, nVar = and_op(varsAnd)
 		# Add the last constraint
-		newCoeffs.append(tCoeff)
-		newVars.append(tContr)
-		rhsVals.append(nProp-1)
-		timeVal.append(t)
+		newCoeffs.extend(nCoeffs)
+		newVars.extend(nVars)
+		rhsVals.extend(rVals)
+		timeVal.extend([t for _ in range(len(nCoeffs))])
 		return newCoeffs, newVars, rhsVals, nVar, timeVal
 
 class OrGTL(GTLFormula):
@@ -294,15 +336,6 @@ class OrGTL(GTLFormula):
 			:param t : the time index at which the formula must be true
 			:param Kp :  the graph trajectory length cycle
 		"""
-		global N_VARS, BIG_M, STRICT_INEQ, BOOL_VAR
-
-		# Create the variable storing the result of the feasibility of this formula
-		nVar = (N_VARS, BOOL_VAR-1) # -1 means it is a boolean var and -2 means it is not
-		N_VARS += 1	# Increment the number of new variables
-
-		# Get the number of propositions in the AND operation
-		nProp = len(self.mFormula)
-
 		# Save the new constrainrs
 		newCoeffs = list()
 		newVars = list()
@@ -310,29 +343,20 @@ class OrGTL(GTLFormula):
 		timeVal = list()
 
 		# Get the MILP representation using the array repr of the linear label
-		tContr = list()
-		tCoeff =  list()
+		varsAnd = list()
 		for gtl in self.mFormula:
 			nCoeffs, nVars, rhsVs, fEval, tVal = gtl.milp_repr(lG, node, t, Kp)
 			newCoeffs.extend(nCoeffs)
 			newVars.extend(nVars)
 			rhsVals.extend(rhsVs)
 			timeVal.extend(tVal)
-			# Add the constraint by the or operator
-			newCoeffs.append([-1, 1])
-			newVars.append([nVar, fEval])
-			rhsVals.append(0)
-			timeVal.append(t)
-			# Save the sum of results of past formula
-			tContr.append(fEval)
-			tCoeff.append(-1)
-		tContr.append(nVar)
-		tCoeff.append(1)
+			varsAnd.append(fEval)
+		nCoeffs, nVars, rVals, nVar = or_op(varsAnd)
 		# Add the last constraint
-		newCoeffs.append(tCoeff)
-		newVars.append(tContr)
-		rhsVals.append(0)
-		timeVal.append(t)
+		newCoeffs.extend(nCoeffs)
+		newVars.extend(nVars)
+		rhsVals.extend(rVals)
+		timeVal.extend([t for _ in range(len(nCoeffs))])
 		return newCoeffs, newVars, rhsVals, nVar, timeVal
 
 class NotGTL(GTLFormula):
@@ -395,63 +419,235 @@ class NextGTL(GTLFormula):
 			:param t : the time index at which the formula must be true
 			:param Kp :  the graph trajectory length cycle
 		"""
-		global N_VARS, BIG_M, STRICT_INEQ, BOOL_VAR
 		if t < Kp:
 			# Get the MILP representation of the formula after not operator
 			return self.rFormula.milp_repr(lG, node, t+1, Kp)
-
-		nVar = (N_VARS, BOOL_VAR-1) # -1 means it is a boolean var and -2 means it is not
-		N_VARS += 1	# Increment the number of new variables
 
 		# In case t == Kp, the next time step is implied by the position of the loop
 		newCoeffs = list()
 		newVars = list()
 		rhsVals = list()
 		timeVal = list()
-		tContr = list()
-		tCoeff =  list()
+
+		varsAnd = list()
 		for i in range(1, Kp+1):
 			nCoeffs, nVars, rhsVs, fEval, tVal = self.rFormula.milp_repr(lG, node, i, Kp)
-			ljVar = (i, BOOL_VAR-2)
 			newCoeffs.extend(nCoeffs)
 			newVars.extend(nVars)
 			rhsVals.extend(rhsVs)
 			timeVal.extend(tVal)
-			# Intersection lj nVar constraint
-			ntVar = (N_VARS, BOOL_VAR-1) # -1 means it is a boolean var and -2 means it is not
-			N_VARS += 1	# Increment the number of new variables
-			
-			newCoeffs.append([1, -1])
-			newVars.append([ntVar, fEval])
-			rhsVals.append(0)
-			timeVal.append(i)
 
-			newCoeffs.append([1, -1])
-			newVars.append([ntVar, ljVar])
-			rhsVals.append(0)
-			timeVal.append(i)
+			ljVar = (i, BOOL_VAR-2)
+			nCs, nVs, rs, nV = and_op([fEval, ljVar])
+			newCoeffs.extend(nCs)
+			newVars.extend(nVs)
+			rhsVals.extend(rs)
+			timeVal.extend([i for _ in range(len(nCs))])
+			varsAnd.append(nV)
 
-			newCoeffs.append([1, 1, -1])
-			newVars.append([fEval, ljVar, ntVar])
-			rhsVals.append(1)
-			timeVal.append(i)
+		nCoeffs, nVars, rVals, nVar = or_op(varsAnd)
 
-			# Add the binding constraints of the result of each prop
-			newCoeffs.append([-1, 1])
-			newVars.append([nVar, ntVar])
-			rhsVals.append(0)
-			timeVal.append(i)
-
-			tContr.append(ntVar)
-			tCoeff.append(-1)
-		tContr.append(nVar)
-		tCoeff.append(1)
 		# Add the last constraint
-		newCoeffs.append(tCoeff)
-		newVars.append(tContr)
-		rhsVals.append(0)
-		timeVal.append(Kp)
+		newCoeffs.extend(nCoeffs)
+		newVars.extend(nVars)
+		rhsVals.extend(rVals)
+		timeVal.extend([Kp for _ in range(len(nCoeffs))])
 		return newCoeffs, newVars, rhsVals, nVar, timeVal
+
+class AlwaysGTL(GTLFormula):
+	def __init__(self, rFormula):
+		self.rFormula = rFormula
+
+	def __repr__(self):
+		return 'G({})'.format(self.rFormula)
+
+	def milp_repr(self, lG, node, t, Kp):
+		"""
+			Get the Mixed-integer linear representation of this formula.
+			This function will be used by the MILP solver to find the adequate
+			Markov chain to probabilistically control the swarm
+			:param lG : the labelled graph
+			:param node : the node at which to evaluate the formula
+			:param t : the time index at which the formula must be true
+			:param Kp :  the graph trajectory length cycle
+		"""
+		if t == Kp:
+			# Get the MILP representation of the formula after Always operator
+			return self.rFormula.milp_repr(lG, node, t, Kp)
+
+		nC1, nV1, rhsVs1, fEval1, tVal1 = self.rFormula.milp_repr(lG, node, t, Kp)
+		nC2, nV2, rhsVs2, fEval2, tVal2 = self.milp_repr(lG, node, t+1, Kp)
+		nC1.extend(nC2)
+		nV1.extend(nV2)
+		rhsVs1.extend(rhsVs2)
+		tVal1.extend(tVal2)
+		nCoeffs, nVars, rVals, nVar = and_op([fEval1, fEval2])
+		nC1.extend(nCoeffs)
+		nV1.extend(nVars)
+		rhsVs1.extend(rVals)
+		tVal1.extend([t for _ in range(len(nCoeffs))])
+		return nC1, nV1, rhsVs1, nVar, tVal1
+
+class EventuallyAlwaysGTL(GTLFormula):
+	"""
+		This formula represents the persistence property Eventually always
+	"""
+	def __init__(self, rFormula):
+		self.rFormula = rFormula
+
+	def __repr__(self):
+		return 'FG({})'.format(self.rFormula)
+
+	def milp_repr(self, lG, node, t, Kp):
+		"""
+			Get the Mixed-integer linear representation of this formula.
+			This function will be used by the MILP solver to find the adequate
+			Markov chain to probabilistically control the swarm
+			:param lG : the labelled graph
+			:param node : the node at which to evaluate the formula
+			:param t : the time index at which the formula must be true
+			:param Kp :  the graph trajectory length cycle
+		"""
+		newCoeffs = list()
+		newVars = list()
+		rhsVals = list()
+		timeVal = list()
+
+		orList = list()
+		for i in range(1,Kp+1):
+			lVar = [(i, BOOL_VAR-2)]
+			for j in range(i,Kp+1):
+				nCoeffs, nVars, rhsVs, fEval, tVal = \
+					self.rFormula.milp_repr(lG, node, j, Kp)
+				newCoeffs.extend(nCoeffs)
+				newVars.extend(nVars)
+				rhsVals.extend(rhsVs)
+				timeVal.extend(tVal)
+				lVar.append(fEval)
+			nC1, nV1, rhsV1, nVar1 = and_op(lVar)
+			newCoeffs.extend(nC1)
+			newVars.extend(nV1)
+			rhsVals.extend(rhsV1)
+			timeVal.extend([i for _ in range(len(nC1))])
+			orList.append(nVar1)
+		nC1, nV1, rhsV1, nVar1 = or_op(orList)
+		newCoeffs.extend(nC1)
+		newVars.extend(nV1)
+		rhsVals.extend(rhsV1)
+		timeVal.extend([t for _ in range(len(nC1))])
+		return newCoeffs, newVars, rhsVals, nVar1, timeVal
+
+class AlwaysEventuallyGTL(GTLFormula):
+	"""
+		This formula represents the liveness property Always eventually.
+	"""
+	def __init__(self, rFormula):
+		self.rFormula = rFormula
+
+	def __repr__(self):
+		return 'GF({})'.format(self.rFormula)
+
+	def milp_repr(self, lG, node, t, Kp):
+		"""
+			Get the Mixed-integer linear representation of this formula.
+			This function will be used by the MILP solver to find the adequate
+			Markov chain to probabilistically control the swarm
+			:param lG : the labelled graph
+			:param node : the node at which to evaluate the formula
+			:param t : the time index at which the formula must be true
+			:param Kp :  the graph trajectory length cycle
+		"""
+		newCoeffs = list()
+		newVars = list()
+		rhsVals = list()
+		timeVal = list()
+
+		orList = list()
+		for i in range(1,Kp+1):
+			ljVar = (i, BOOL_VAR-2)
+			lVar = []
+			for j in range(i,Kp+1):
+				nCoeffs, nVars, rhsVs, fEval, tVal = \
+					self.rFormula.milp_repr(lG, node, j, Kp)
+				newCoeffs.extend(nCoeffs)
+				newVars.extend(nVars)
+				rhsVals.extend(rhsVs)
+				timeVal.extend(tVal)
+				lVar.append(fEval)
+			nC1, nV1, rhsV1, nVar1 = or_op(lVar)
+			newCoeffs.extend(nC1)
+			newVars.extend(nV1)
+			rhsVals.extend(rhsV1)
+			timeVal.extend([i for _ in range(len(nC1))])
+
+			nC1, nV1, rhsV1, nVar1 = and_op([ljVar, nVar1])
+			newCoeffs.extend(nC1)
+			newVars.extend(nV1)
+			rhsVals.extend(rhsV1)
+			timeVal.extend([i for _ in range(len(nC1))])
+
+			orList.append(nVar1)
+
+		nC1, nV1, rhsV1, nVar1 = or_op(orList)
+		newCoeffs.extend(nC1)
+		newVars.extend(nV1)
+		rhsVals.extend(rhsV1)
+		timeVal.extend([t for _ in range(len(nC1))])
+		return newCoeffs, newVars, rhsVals, nVar1, timeVal
+
+class NeighborGTL(GTLFormula):
+	"""
+		This formula represents an the liveness property Always eventually.
+	"""
+	def __init__(self, rFormula, D, N):
+		self.rFormula = rFormula
+		self.N = N
+		self.D = D
+
+	def __repr__(self):
+		return 'O({})'.format(self.rFormula)
+
+	def milp_repr(self, lG, node, t, Kp):
+		"""
+			Get the Mixed-integer linear representation of this formula.
+			This function will be used by the MILP solver to find the adequate
+			Markov chain to probabilistically control the swarm
+			:param lG : the labelled graph
+			:param node : the node at which to evaluate the formula
+			:param t : the time index at which the formula must be true
+			:param Kp :  the graph trajectory length cycle
+		"""
+		Sv = get_neighbors(lG, node, self.D)
+		assert len(Sv) >= self.N
+		allSubset = list(itertools.combinations(Sv, self.N))
+		newCoeffs = list()
+		newVars = list()
+		rhsVals = list()
+		timeVal = list()
+		or_list = []
+		for lSubset in allSubset:
+			and_list = []
+			for v in lSubset:
+				nCoeffs, nVars, rhsVs, fEval, tVal = \
+							self.rFormula.milp_repr(lG, v, t, Kp)
+				newCoeffs.extend(nCoeffs)
+				newVars.extend(nVars)
+				rhsVals.extend(rhsVs)
+				timeVal.extend(tVal)
+				and_list.append(fEval)
+			nC1, nV1, rhsV1, nVar1 = and_op(and_list)
+			newCoeffs.extend(nC1)
+			newVars.extend(nV1)
+			rhsVals.extend(rhsV1)
+			timeVal.extend([t for _ in range(len(nC1))])
+			or_list.append(nVar1)
+		nC1, nV1, rhsV1, nVar1 = or_op(or_list)
+		newCoeffs.extend(nC1)
+		newVars.extend(nV1)
+		rhsVals.extend(rhsV1)
+		timeVal.extend([t for _ in range(len(nC1))])
+		return newCoeffs, newVars, rhsVals, nVar1, timeVal
+
 
 if __name__ == "__main__":
     """
@@ -515,3 +711,19 @@ if __name__ == "__main__":
     # Create Next constraint
     next1 = NextGTL(piV1)
     print_milp_repr(next1, lG, 1, 5, 5)
+
+    # Create always variable
+    always1 = AlwaysGTL(piV1)
+    print_milp_repr(always1, lG, 1, 0, 3)
+
+    # Create always eventually
+    alwaysEven1 = AlwaysEventuallyGTL(piV1)
+    print_milp_repr(alwaysEven1, lG, 1, 0, 3)
+
+    # Create always eventually
+    evenAlways1 = EventuallyAlwaysGTL(piV1)
+    print_milp_repr(evenAlways1, lG, 1, 0, 3)
+
+    # Create neighbor constraints
+    neigh1 = NeighborGTL(piV1, 1, 1)
+    print_milp_repr(neigh1, lG, 1, 0, 3)
