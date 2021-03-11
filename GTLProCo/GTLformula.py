@@ -8,32 +8,169 @@ BIG_M = 1e3
 N_VARS = 0
 BOOL_VAR = -1
 
-def get_neighbors(lG, node, k):
+def create_milp_constraints(listFormula, listNode, Kp, lG, initTime=0):
 	"""
-		Get the set of subset of nodes at distance k from current node
-		:param lG : labelled graph
-		:param node : the node at which to evaluate the GTL formula
-		:param k : Distance to the node in term of edges
+		Create the MILP constraints associated to the list of formula
+		and the corresponding nodes.
+		The MILP should be an equivalent formulation for satisfaction
+		of each formula at each node at time 0
 	"""
-	Edge = lG.getGlobalEdgeSet()
-	if k == 1:
-		resNode = set()
-		for (s1, s2) in Edge:
-			if s1 == node:
-				resNode.add(s2)
-			if s2 == node:
-				resNode.add(s1)
-		return resNode
-	res = get_neighbors(lG, node, k-1)
-	nRes = set()
-	for s in res:
-		for (s1, s2) in Edge:
-			if s1 == s:
-				nRes.append(s2)
-			if s2 == s:
-				nRes.append(s1)
-	return nRes
+	assert isinstance(listFormula, list) and isinstance(listNode, list), "Argument should be a list"
+	assert len(listFormula) == len(listNode), "Different list length between formulas and nodes"
+	
+	newCoeffs = list()
+	newVars = list()
+	rhsVals = list()
+	timeVal = list()
 
+	varsAnd = list()
+	for gtl, node in zip(listFormula, listNode):
+		nCoeffs, nVars, rhsVs, fEval, tVal = gtl.milp_repr(lG, node, initTime, Kp)
+		newCoeffs.extend(nCoeffs)
+		newVars.extend(nVars)
+		rhsVals.extend(rhsVs)
+		timeVal.extend(tVal)
+		varsAnd.append(fEval)
+
+	# Add the last constraint AND constraint between each formula
+	if len(listFormula) > 1:
+		nCoeffs, nVars, rVals, nVar = and_op(varsAnd)
+		newCoeffs.extend(nCoeffs)
+		newVars.extend(nVars)
+		rhsVals.extend(rVals)
+		timeVal.extend([initTime for _ in range(len(nCoeffs))])
+	else:
+		nVar = varsAnd[0]
+
+	# The formula must be True nVar == 1
+	newCoeffs.append([1])
+	newVars.append([nVar])
+	rhsVals.append(1)
+	timeVal.append(initTime)
+
+	newCoeffs.append([-1])
+	newVars.append([nVar])
+	rhsVals.append(-1)
+	timeVal.append(initTime)
+
+	# Add the constraint due to the loop
+	lCoeffs = list()
+	lVars = list()
+	lRHS = list()
+
+	lCoeffs.append([1 for i in range(1, Kp+1)])
+	lVars.append([ (i, BOOL_VAR-2) for i in range(1,Kp+1)])
+	lRHS.append(1)
+	lCoeffs.append([-1 for i in range(1, Kp+1)])
+	lVars.append([ (i, BOOL_VAR-2) for i in range(1,Kp+1)])
+	lRHS.append(-1)
+
+	for node in listNode:
+		(coeffs, var) = lG.getLabelMatRepr(node)
+		for j in range(1, Kp+1):
+			for cV, indexV in zip(coeffs, var):
+				t1 = [c for c in cV]
+				t2 = [-c for c in cV]
+				v1 = [(v[0],v[1], Kp) for v in indexV]
+				v2 = [(v[0],v[1], j-1) for v in indexV]
+				lCoeffs.append(t1 + t2 + [BIG_M])
+				lVars.append(v1 + v2 + [(j,BOOL_VAR-2)])
+				lRHS.append(BIG_M)
+				lCoeffs.append(t2 + t1 + [BIG_M])
+				lVars.append(v1 + v2 + [(j,BOOL_VAR-2)])
+				lRHS.append(BIG_M)
+	return (newCoeffs, newVars, rhsVals, nVar, timeVal), (lCoeffs, lVars, lRHS)
+
+def getVars(newVars, timeVal, lVars=list()):
+	"""
+	Return the boolean and continuous variables provided by the inputs
+	"""
+	assert len(newVars) == len(timeVal) # Sanity check
+	varBool = set()
+	varReal = set()
+	varL = set()
+	densDistr = set()
+	for vs, ts in zip(newVars, timeVal):
+		for (ind1, ind2) in vs:
+			if ind2 == BOOL_VAR:
+				varBool.add((ind1, ts))
+			elif ind2 == BOOL_VAR-1:
+				varReal.add((ind1, ts))
+			elif ind2 == BOOL_VAR-2:
+				varL.add(ind1)
+			else:
+				densDistr.add((ind1, ind2, ts))
+	for vs in lVars:
+		for ind in vs:
+			if ind[1] == BOOL_VAR-2:
+				varL.add(ind[0])
+			else:
+				densDistr.add(ind)
+	return varBool, varReal, varL, densDistr
+
+
+def print_constr(newCoeffs, newVars, rhsVals, nVar, timeVal,
+							lCoeffs=list(), lVars=list(), lRHS=list()):
+	"""
+		Provide a string representation of the MILP constraints
+		encoded by the given aruguments
+	"""
+	# Sanity check
+	assert len(newVars) == len(newCoeffs) and len(newVars) == len(timeVal) and \
+				len(newVars) == len(rhsVals)
+	assert len(lCoeffs) == len(lVars) and len(lVars) == len(lRHS)
+	# Store the set of all variables of this MILP representation
+	varBool, varReal, varL, densDistr = getVars(newVars, timeVal, lVars)
+	dictVar = dict()
+	for (ind1, ts) in varBool:
+		dictVar[(ind1, ts)] = 'b_{}({})'.format(ind1, ts)
+	for (ind1, ts) in varReal:
+		dictVar[(ind1, ts)] = 'r_{}({})'.format(ind1, ts)
+	for ind1 in varL:
+		dictVar[ind1] = 'l_{}'.format(ind1)
+	for (ind1, ind2, ts) in densDistr:
+		dictVar[(ind1, ind2, ts)] = 'x_{}_{}({})'.format(ind1, ind2, ts)
+	print (dictVar)
+	# GTL formula constraints
+	resContr = list()
+	for nCoeffs, vs, rhsV, ts in zip(newCoeffs, newVars, rhsVals, timeVal):
+		# varV = dictVar.get((v[0], v[1], ts), dictVar.get((v[0], ts), dictVar[v[0]]))
+		# (v[0], v[1], ts) if v[1] > BOOL_VAR else (v[0] if v[1] == BOOL_VAR-2 else (v[0], ts))
+		print(vs, ts)
+		contrRepr = ['{}*{}'.format(c, dictVar[(v[0], v[1], ts) if v[1] > BOOL_VAR else (v[0] if v[1] == BOOL_VAR-2 else (v[0], ts))]) \
+								for c, v in zip(nCoeffs, vs)]
+		sumRes = '{} <= {}'.format(' + '.join(contrRepr), rhsV)
+		resContr.append(sumRes)
+	# Loop constraints
+	lConstr = list()
+	for nCoeffs, vs, rhsV in zip(lCoeffs, lVars, lRHS):
+		print(vs)
+		contrRepr = ['{}*{}'.format(c, dictVar[ v[0] if len(v) == 2 else v]) \
+											for c, v in zip(nCoeffs, vs)]
+		sumRes = '{} <= {}'.format(' + '.join(contrRepr), rhsV)
+		lConstr.append(sumRes)
+
+	# Start the printing formula
+	print('-------------------------')
+	print('Result variables: {}'.format(dictVar[(nVar[0],timeVal[-1])]))
+	print('-------------------------')
+	print('Boolean variables in {0,1}')
+	print(', '.join(varBool))
+	print('-------------------------')
+	print('Real variables in [0,1]')
+	print(', '.join(varReal))
+	print('-------------------------')
+	print('Density variables in [0,1]')
+	print(', '.join(densDistr))
+	print('-------------------------')
+	print('Loop variables in {0,1}')
+	print(', '.join(ljVar))
+	print('-------------------------')
+	print('Constraints GTL formula')
+	print('\n'.join(resContr))
+	print('-------------------------')
+	print('Constraints Loop')
+	print('\n'.join(lConstr))
 
 def and_op(bVars):
 	""" 
@@ -177,6 +314,32 @@ def print_milp_repr(gtl, lG, node, t, Kp):
 	print('Constraints')
 	print('\n'.join(resContr))
 		
+
+def get_neighbors(lG, node, k):
+	"""
+		Get the set of subset of nodes at distance k from current node
+		:param lG : labelled graph
+		:param node : the node at which to evaluate the GTL formula
+		:param k : Distance to the node in term of edges
+	"""
+	Edge = lG.getGlobalEdgeSet()
+	if k == 1:
+		resNode = set()
+		for (s1, s2) in Edge:
+			if s1 == node:
+				resNode.add(s2)
+			if s2 == node:
+				resNode.add(s1)
+		return resNode
+	res = get_neighbors(lG, node, k-1)
+	nRes = set()
+	for s in res:
+		for (s1, s2) in Edge:
+			if s1 == s:
+				nRes.append(s2)
+			if s2 == s:
+				nRes.append(s1)
+	return nRes
 
 class GTLFormula(ABC):
 	"""
@@ -727,3 +890,8 @@ if __name__ == "__main__":
     # Create neighbor constraints
     neigh1 = NeighborGTL(piV1, 1, 1)
     print_milp_repr(neigh1, lG, 1, 0, 3)
+
+    always1 = AlwaysGTL(piV1)
+    # print_milp_repr(always1, lG, 1, 0, 3)
+    resV1, resv2 = create_milp_constraints([always1], [1], 3, lG, initTime=0)
+    print_constr(*resV1, *resv2)
