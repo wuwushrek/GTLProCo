@@ -3,6 +3,7 @@ from .GTLformula import *
 
 # Import the optimizer tools
 import gurobipy as gp
+import time
 
 def create_linearize_constr(mOpt, xDen, MarkovM, dictSlack, dictConstr, swam_ids, Kp, node_ids):
 	""" Create a gurobi prototype of linearized nonconvex constraint
@@ -44,7 +45,7 @@ def create_linearize_constr(mOpt, xDen, MarkovM, dictSlack, dictConstr, swam_ids
 				mOpt.addConstr(dictSlack[(s_id, n_id,t)] <= dictSlack[(s_id, -n_id-1,t)])
 				mOpt.addConstr(dictSlack[(s_id, n_id,t)] >= -dictSlack[(s_id, -n_id-1,t)])
 
-def update_opt_step_k(mOpt, xDen, MarkovM, dictConstr, trustRegion, xk, Mk, swam_ids, Kp, node_ids):
+def update_opt_step_k(mOpt, xDen, MarkovM, initRange, dictConstr, trustRegion, xk, Mk, swam_ids, Kp, node_ids):
 	"""
 		Update the optimization problem based on the optimal solution at the past iteration
 		given by xk and Mk
@@ -55,12 +56,12 @@ def update_opt_step_k(mOpt, xDen, MarkovM, dictConstr, trustRegion, xk, Mk, swam
 			for m_id in node_ids:
 				for t in range(Kp):
 					MarkovM[(s_id, n_id, m_id, t)].lb = \
-						np.maximum(Mk[(s_id, n_id, m_id, t)]-trustRegion, 0)
+						np.maximum(Mk[(s_id, n_id, m_id, t)]-trustRegion, initRange[(s_id, n_id, m_id, t)][0])
 					MarkovM[(s_id, n_id, m_id, t)].ub = \
-						np.minimum(Mk[(s_id, n_id, m_id, t)]+trustRegion, 1)
+						np.minimum(Mk[(s_id, n_id, m_id, t)]+trustRegion, initRange[(s_id, n_id, m_id, t)][1])
 
 	for (s_id, n_id, t), c in dictConstr.items():
-		c.RHS = xk[(s_id, n_id, t+1)]-2*sum([Mk[(s_id, n_id, m_id, t)]*xk[(s_id, m_id, t)] for m_id in node_ids])
+		c.RHS = -sum([Mk[(s_id, n_id, m_id, t)]*xk[(s_id, m_id, t)] for m_id in node_ids])
 		for m_id in node_ids:
 			mOpt.chgCoeff(c, MarkovM[(s_id, n_id, m_id, t)], -xk[(s_id, m_id, t)])
 			mOpt.chgCoeff(c, xDen[(s_id, m_id, t)], - Mk[(s_id, n_id, m_id, t)])
@@ -83,7 +84,8 @@ def compute_actual_penalized_cost(cost_fun, lam, xk, Mk, swam_ids, Kp, node_ids)
 
 def sequential_optimization(mOpt, cost_fun, xDen, MarkovM, dictConstr, swam_ids, Kp, 
 			node_ids, maxIter=20, epsTol=1e-5, lamda=10, devM=0.5, rho0=1e-5, 
-			rho1=0.25, rho2=0.7, alpha=2.0, beta=3.5):
+			rho1=0.5, rho2=0.8, alpha=2.0, beta=1.5, 
+			timeLimit=5, n_thread=0, verbose=True, autotune=True):
 	""" Solve the sequential mixed integer linear program
 	:param maxIter : The maximum number of iteration of the algorithm
 	:param epsTol : The desired tolerance of the optimal solution
@@ -97,23 +99,58 @@ def sequential_optimization(mOpt, cost_fun, xDen, MarkovM, dictConstr, swam_ids,
 	"""
 	dictXk = dict()
 	dictMk = dict()
+	initRange = dict()
 	# Save the initial point that do not need to be feasible
 	for s_id in swam_ids:
-		for n_id in node_ids:
+		for m_id in node_ids:
 			for t in range(Kp+1):
-				dictXk[(s_id, n_id, t)] = 0.5 *(xDen[(s_id, n_id, t)].lb + xDen[(s_id, n_id, t)].ub)
+				dictXk[(s_id, m_id, t)] = 0.5 *(xDen[(s_id, m_id, t)].lb + xDen[(s_id, m_id, t)].ub)
 				if t == Kp:
 					continue
-				for m_id in node_ids:
-					dictMk[(s_id, n_id,m_id,t)] = 0.5*(MarkovM[(s_id, n_id,m_id,t)].lb + MarkovM[(s_id, n_id,m_id,t)].ub)
+				countEnforced = 0
+				for n_id in node_ids:
+					countEnforced += MarkovM[(s_id, n_id,m_id,t)].lb
+					dictMk[(s_id, n_id,m_id,t)] = MarkovM[(s_id, n_id,m_id,t)].lb
+					# dictMk[(s_id, n_id,m_id,t)] = 0.5*(MarkovM[(s_id, n_id,m_id,t)].lb + MarkovM[(s_id, n_id,m_id,t)].ub)
+					initRange[((s_id, n_id,m_id,t))] = (MarkovM[(s_id, n_id,m_id,t)].lb, MarkovM[(s_id, n_id,m_id,t)].ub)
+				assert countEnforced < 1
+				residueV = 1 - countEnforced
+				for n_id in node_ids:
+					if dictMk[(s_id, n_id,m_id,t)] + residueV >= MarkovM[(s_id, n_id,m_id,t)].lb and \
+						dictMk[(s_id, n_id,m_id,t)] + residueV <= MarkovM[(s_id, n_id,m_id,t)].ub:
+						dictMk[(s_id, n_id,m_id,t)] = dictMk[(s_id, n_id,m_id,t)]  + residueV
+						break
+
 	# INitialize the trust region
 	rk = devM
 	Jk = None
+	solve_time = 0
+	status = -1
+	# Set the limit on the time limit
+	mOpt.Params.OutputFlag = verbose
+	mOpt.Params.Threads = n_thread
+	mOpt.Params.TimeLimit = timeLimit
 	for iterV in range(maxIter):
+		# Check if teh time limit is elapsed
+		if solve_time >= timeLimit:
+			status = -1
+			break
 		# Update the optimization problem and solve it
-		update_opt_step_k(mOpt, xDen, MarkovM, dictConstr, rk, dictXk, dictMk, swam_ids, Kp, node_ids)
+		update_opt_step_k(mOpt, xDen, MarkovM, initRange, dictConstr, rk, dictXk, dictMk, swam_ids, Kp, node_ids)
+		if iterV == 0 and autotune:
+			mOpt.update()
+			mOpt.tune()
+		cur_t = time.time()
 		mOpt.optimize()
-
+		solve_time += time.time() - cur_t
+		if mOpt.status == gp.GRB.OPTIMAL:
+			status = 1
+		elif mOpt.status == gp.GRB.TIME_LIMIT:
+			status = -1
+			break
+		else:
+			status = 0
+			break
 		dictXk1 = dict()
 		dictMk1 = dict()
 		for s_id in swam_ids:
@@ -129,7 +166,6 @@ def sequential_optimization(mOpt, cost_fun, xDen, MarkovM, dictConstr, swam_ids,
 		if Jk is None:
 			Jk = compute_actual_penalized_cost(cost_fun, lamda, dictXk, dictMk, swam_ids, Kp, node_ids)
 		Jk1 = compute_actual_penalized_cost(cost_fun, lamda, dictXk1, dictMk1, swam_ids, Kp, node_ids)
-
 		deltaJk = Jk - Jk1
 		deltaLk = Jk - Lk1
 
@@ -142,9 +178,13 @@ def sequential_optimization(mOpt, cost_fun, xDen, MarkovM, dictConstr, swam_ids,
 
 		# If the approximation is too loose - contract the trust region and restart the otpimization
 		rhok = deltaJk / deltaLk
-		print('Iteration : {}, Rhok : {}'.format(iterV, rhok))
-		print('deltaJk : ', deltaJk)
-		print('deltaLk : ', deltaLk)
+		if verbose:
+			print('Iteration : {}, Rhok : {}, rk : {}'.format(iterV, rhok, rk))
+			print('Lk : {}, Lk+1 : {}'.format(Jk, Lk1))
+			print('Jk : {}, Jk+1 : {}'.format(Jk, Jk1))
+			print('deltaJk : ', deltaJk)
+			print('deltaLk : ', deltaLk)
+			# print('Jk+1 : ', Jk1)
 		if rhok < rho0:
 			rk = rk / alpha
 			continue
@@ -156,9 +196,12 @@ def sequential_optimization(mOpt, cost_fun, xDen, MarkovM, dictConstr, swam_ids,
 
 		# UPdate the trust region if needed
 		rk = rk / alpha if rhok < rho1 else (beta*rk if rho2 < rhok else rk)
-		if rk < 1e-5:
+		rk = np.minimum(rk, 1) # rk should be less than 1 due to the Markov matrix values
+		if rk < 1e-6:
+			print(' Algorithm stopped : {}<1e-6, trust region too small'.format(rk))
 			break
-	return dictXk, dictMk1
+	# return dictXk, dictMk1
+	return status, solve_time
 
 
 def create_den_constr(xDen, swam_ids, Kp, node_ids):
@@ -172,7 +215,7 @@ def create_den_constr(xDen, swam_ids, Kp, node_ids):
 			listConstr.append(sum([ xDen[(s_id, n_id, t)] for n_id in node_ids]) == 1)
 	return listConstr
 
-def create_markov_constr(MarkovM, swam_ids, Kp, node_ids, edgeSwarm):
+def create_markov_constr(MarkovM, swam_ids, Kp, node_ids):
 	""" Given symbolic variables (gurobi, pyomo, etc..) representing the Markov matrices
 		at all times, this function returns the constraint 1^T M^s(t) = 1 for all s and t
 		and M_ij^s(t) == 0 for (j,i) not in the edge list
@@ -184,10 +227,10 @@ def create_markov_constr(MarkovM, swam_ids, Kp, node_ids, edgeSwarm):
 			for n_id in node_ids:
 				listConstr.append(sum([MarkovM[(s_id,m_id,n_id,t)] for m_id in node_ids]) == 1)
 	# Adjacency natrix constraints
-	for s_id, edges in edgeSwarm.items():
-		for t in range(Kp):
-			for (n_id, m_id) in edges:
-				listConstr.append(MarkovM[(s_id, m_id, n_id, t)] == 0)
+	# for s_id, edges in edgeSwarm.items():
+	# 	for t in range(Kp):
+	# 		for (n_id, m_id) in edges:
+	# 			listConstr.append(MarkovM[(s_id, m_id, n_id, t)] == 0)
 
 	return listConstr
 
@@ -242,11 +285,16 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, cost_fun=None, addBilinear=
 	# Create the different Markov matrices
 	MarkovM = dict()
 	for s_id in swarm_ids:
+		nedges = lG.getSubswarmNonEdgeSet(s_id)
 		for n_id in node_ids:
 			for m_id in node_ids:
 				for t in range(Kp):
-					MarkovM[(s_id, n_id, m_id, t)] = \
-						util_funs['r']('M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t))
+					if (m_id, n_id) in nedges:
+						MarkovM[(s_id, n_id, m_id, t)] = \
+							util_funs['r']('M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t),0,0)
+					else:
+						MarkovM[(s_id, n_id, m_id, t)] = \
+							util_funs['r']('M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t))
 	# mOpt.addVar(lb=0, ub=1, name='M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t))
 	
 	# Create the boolean variables from the GTL formula -> add them to the xDen dictionary
@@ -268,7 +316,7 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, cost_fun=None, addBilinear=
 	listContr = create_den_constr(xDen,swarm_ids, Kp, node_ids)
 
 	# Add the constraints on the Markov matrices
-	listContr.extend(create_markov_constr(MarkovM, swarm_ids, Kp, node_ids, lG.neSubswarm))
+	listContr.extend(create_markov_constr(MarkovM, swarm_ids, Kp, node_ids))
 
 	# Add the bilinear constraints
 	if addBilinear:
@@ -286,15 +334,15 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, cost_fun=None, addBilinear=
 	util_funs['cost'](costVal, xDen, MarkovM, swarm_ids, node_ids)
 
 	# Solve the problem
-	optCost = -np.inf
+	optCost, status, solveTime = -np.inf, -1, 0
 	if solve:
-		optCost = util_funs['solve']()
+		optCost, status, solveTime = util_funs['solve']()
 
 	# Get the solution of the problem
 	xDictRes = dict()
 	MDictRes = dict()
 	ljRes = dict()
-	if solve:
+	if solve and status ==1:
 		for s_id in swarm_ids:
 			for n_id in node_ids:
 				for t in range(Kp+1):
@@ -311,24 +359,34 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, cost_fun=None, addBilinear=
 
 		for ind0 in lVars:
 			ljRes[ind0] = util_funs['opt'](xDen[ind0])
-	return optCost, xDictRes, MDictRes, ljRes, swarm_ids, node_ids
+	return optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids
 
 
-def create_minlp_gurobi(milp_expr, lG, Kp, cost_fun=None, solve=True):
+def create_minlp_gurobi(milp_expr, lG, Kp, cost_fun=None, solve=True, 
+						timeLimit=5, n_thread=0, verbose=False):
 	# Create the Gurobi model
 	mOpt = gp.Model('Bilinear MINLP formulation through GUROBI')
-	mOpt.Params.OutputFlag = True
-	mOpt.params.NonConvex = 2
+	mOpt.Params.OutputFlag = verbose
+	mOpt.Params.NonConvex = 2
+	mOpt.Params.Threads = n_thread
+	mOpt.Params.TimeLimit = timeLimit
 	def set_cost(cVal, xDen, mD, sids, nids):
 		mOpt.setObjective(cVal, gp.GRB.MINIMIZE)
 	def solve_f():
+		c_time = time.time()
 		mOpt.optimize()
-		return mOpt.objVal
+		dur = time.time() - c_time
+		if mOpt.status == gp.GRB.OPTIMAL:
+			return mOpt.objVal, 1, dur
+		elif mOpt.status == gp.GRB.TIME_LIMIT:
+			return mOpt.objVal, -1, dur
+		else:
+			return -np.inf, 0, dur
 	def ret_sol(solV):
 		return solV.x
 
 	util_funs = dict()
-	util_funs['r'] = lambda name : mOpt.addVar(lb=0, ub=1, name=name)
+	util_funs['r'] = lambda name, lb=0, ub=1 : mOpt.addVar(lb=lb, ub=ub, name=name)
 	util_funs['b'] = lambda name : mOpt.addVar(vtype=gp.GRB.BINARY, name=name)
 	util_funs['constr'] = lambda constr : mOpt.addConstr(constr)
 	util_funs['solve'] = solve_f
@@ -340,10 +398,11 @@ def create_minlp_gurobi(milp_expr, lG, Kp, cost_fun=None, solve=True):
 
 def create_gtl_proco(milp_expr, lG, Kp, cost_fun=None, solve=True, 
 					maxIter=20, epsTol=1e-5, lamda=10, devM=0.5, rho0=1e-5, 
-					rho1=0.25, rho2=0.7, alpha=2.0, beta=3.5):
-	# Create the Gurobi model
+					rho1=0.25, rho2=0.7, alpha=2.0, beta=3.5,
+					timeLimit=5, n_thread=0, verbose=True, autotune=True):
+	# Create the Gurobi model,
 	mOpt = gp.Model('Sequential MILP solving through GUROBI')
-	mOpt.Params.OutputFlag = True
+	# mOpt.Params.OutputFlag = True
 
 	# Actual cost 
 	costVal = None
@@ -370,17 +429,22 @@ def create_gtl_proco(milp_expr, lG, Kp, cost_fun=None, solve=True,
 		pen_cost = costVal + lamda * sum(penList)
 		mOpt.setObjective(pen_cost, gp.GRB.MINIMIZE)
 		mOpt.update()
-		mOpt.display()
+		# mOpt.display()
 
 	def solve_f():
-		sequential_optimization(mOpt, cost_fun, xD, MarM, dictConstr, s_ids, Kp, n_ids)
-		return costVal.getValue()
+		status, dur = sequential_optimization(mOpt, cost_fun, xD, MarM, dictConstr, s_ids, Kp, n_ids,
+						maxIter=maxIter, epsTol=epsTol, lamda=lamda, devM=devM, rho0=rho0, 
+						rho1=rho1, rho2=rho2, alpha=alpha, beta=beta,
+						timeLimit=timeLimit, n_thread=n_thread, verbose=verbose, autotune=autotune)
+		if status == 0:
+			return -np.inf, status, dur
+		return costVal.getValue() if not (isinstance(costVal, int) or isinstance(costVal, float)) else costVal, status, dur
 
 	def ret_sol(solV):
 		return solV.x
 
 	util_funs = dict()
-	util_funs['r'] = lambda name : mOpt.addVar(lb=0, ub=1, name=name)
+	util_funs['r'] = lambda name, lb=0, ub=1 : mOpt.addVar(lb=lb, ub=ub, name=name)
 	util_funs['b'] = lambda name : mOpt.addVar(vtype=gp.GRB.BINARY, name=name)
 	util_funs['constr'] = lambda constr : mOpt.addConstr(constr)
 	util_funs['solve'] = solve_f
@@ -390,19 +454,29 @@ def create_gtl_proco(milp_expr, lG, Kp, cost_fun=None, solve=True,
 	# mOpt.update()
 	# mOpt.display()
 
-def create_minlp_scip(milp_expr, lG, Kp, cost_fun=None, solve=True):
+def create_minlp_scip(milp_expr, lG, Kp, cost_fun=None, solve=True,
+						timeLimit=5, n_thread=0, verbose=False):
 	import pyscipopt as pSCIP
 	mOpt = pSCIP.Model('Bilinear MINLP formulation through SCIP')
-	# mOpt.hideOutput()
+	mOpt.hideOutput(quiet = (not verbose))
+	mOpt.setParam('limits/time', timeLimit)
+	# mOpt.setParam('')
 	def set_cost(cVal, xDen, mD, sids, nids):
 		mOpt.setObjective(cVal, "minimize")
 	def solve_f():
+		c_time = time.time()
 		mOpt.optimize()
-		return mOpt.getObjVal()
+		dur = time.time() - c_time
+		if mOpt.getStatus() == 'optimal':
+			return mOpt.getObjVal(), 1, dur
+		elif mOpt.getStatus() == 'timelimit':
+			return mOpt.getObjVal(), -1, dur
+		else:
+			return -np.inf, 0, dur
 	def ret_sol(solV):
 		return mOpt.getVal(solV)
 	util_funs = dict()
-	util_funs['r'] = lambda name : mOpt.addVar(lb=0, ub=1, name=name)
+	util_funs['r'] = lambda name, lb=0, ub=1 : mOpt.addVar(lb=lb, ub=ub, name=name)
 	util_funs['b'] = lambda name : mOpt.addVar(vtype="B", name=name)
 	util_funs['constr'] = lambda constr : mOpt.addCons(constr)
 	util_funs['solve'] = solve_f
@@ -412,14 +486,20 @@ def create_minlp_scip(milp_expr, lG, Kp, cost_fun=None, solve=True):
 	# mOpt.writeProblem('model')
 
 def create_minlp_pyomo(milp_expr, lG, Kp, cost_fun=None, solve=True, 
-			solver='couenne', solverPath='/home/fdjeumou/Documents/non_convex_solver/'):
+			solver='couenne', solverPath='/home/fdjeumou/Documents/non_convex_solver/',
+			timeLimit=5, n_thread=0, verbose=False):
 	from pyomo.environ import Var, ConcreteModel, Constraint, NonNegativeReals, Binary, SolverFactory
 	from pyomo.environ import Objective, minimize
+	import pyutilib
+	from pyomo.opt import SolverStatus, TerminationCondition
+
 	mOpt = ConcreteModel('Bilinear MINLP formulation through PYOMO')
+
 	# Function to return real values
-	def r_values(name):
-		setattr(mOpt, name, Var(bounds=(0,1), within=NonNegativeReals))
+	def r_values(name, lb=0, ub=1):
+		setattr(mOpt, name, Var(bounds=(lb,ub), within=NonNegativeReals))
 		return getattr(mOpt, name)
+
 	def b_values(name):
 		setattr(mOpt, name, Var(within=Binary))
 		return getattr(mOpt, name)
@@ -432,9 +512,20 @@ def create_minlp_pyomo(milp_expr, lG, Kp, cost_fun=None, solve=True,
 
 	def set_cost(cVal, xDen, mD, sids, nids):
 		setattr(mOpt, 'objective', Objective(expr=cVal, sense=minimize))
+
 	def solve_f():
-		results = SolverFactory(solver, executable=solverPath+solver).solve(mOpt, tee=True)
-		return mOpt.objective()
+		solverOpt = SolverFactory(solver, executable=solverPath+solver)
+		try:
+			c_time = time.time()
+			results = solverOpt.solve(mOpt, tee=verbose, timelimit=timeLimit)
+			dur = time.time() - c_time
+			if results.solver.termination_condition == TerminationCondition.optimal:
+				return mOpt.objective(), 1, dur
+			else:
+				return -np.inf, 0, dur
+		except pyutilib.common.ApplicationError:
+			return -np.inf, -1, timeLimit
+
 	def ret_sol(solV):
 		return solV.value
 
@@ -471,9 +562,12 @@ if __name__ == "__main__":
     lG.addNodeLabel(2, x[(0,1)] + x[(1,1)])
     lG.addNodeLabel(3, [x[(0,1)] + x[(0,2)], x[(0,3)] - x[(1,2)]])
 
-    Kp = 3
+    Kp = 15
     piV3 = AtomicGTL([0.5, 0.25])
-    m_milp = create_milp_constraints([piV3], [3], Kp, lG, initTime=0)
+    piV1 = AtomicGTL([0.5])
+    formula1 = AlwaysEventuallyGTL(piV3)
+    formula2 = AlwaysGTL(piV1)
+    m_milp = create_milp_constraints([formula1, formula2], [3, 1], Kp, lG, initTime=0)
 
     def cost_fun(xDict, MDict, swarm_ids, node_ids):
     	costValue = 0
@@ -482,28 +576,60 @@ if __name__ == "__main__":
     			for m_id in node_ids:
     				costValue += MDict[(s_id, n_id, m_id)]
     	return costValue
+    cost_fun = None
+    # print_milp_repr([piV3], [3], Kp, lG, initTime=0)
 
-    print_milp_repr([piV3], [3], Kp, lG, initTime=0)
-
-    optCost, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
-    						create_minlp_gurobi(m_milp, lG, Kp, cost_fun=cost_fun)
+    optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
+    						create_minlp_gurobi(m_milp, lG, Kp, cost_fun=cost_fun,
+    						timeLimit=5, n_thread=1, verbose=False)
     print(ljRes)
-    print(xDictRes)
+    print(optCost, status, solveTime)
+    maxDiff = 0
+    for s_id in swarm_ids:
+    	for n_id in node_ids:
+    		for t in range(Kp):
+    			s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
+    			# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+    			maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+    print(maxDiff)
 
     # create_minlp_scip(m_milp, lG, Kp)
-    optCost, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
-    								create_minlp_scip(m_milp, lG, Kp, cost_fun=cost_fun)
+    optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
+    								create_minlp_scip(m_milp, lG, Kp, cost_fun=cost_fun,
+    									timeLimit=5, n_thread=0, verbose=False)
     print(ljRes)
-    print(xDictRes)
+    print(optCost, status, solveTime)
+    maxDiff = 0
+    for s_id in swarm_ids:
+    	for n_id in node_ids:
+    		for t in range(Kp):
+    			s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
+    			# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+    			maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+    print(maxDiff)
+    # print(xDictRes)
 
     # create_minlp_pyomo(m_milp, lG, Kp)
-    optCost, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
-    								create_minlp_pyomo(m_milp, lG, Kp,cost_fun=cost_fun)
+    optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
+    								create_minlp_pyomo(m_milp, lG, Kp,cost_fun=cost_fun,
+    								timeLimit=5, n_thread=0, verbose=False)
     print(ljRes)
-    print(xDictRes)
-    print(optCost)
+    print(optCost, status, solveTime)
+    # print(xDictRes)
+    # print(optCost)
 
-    optCost, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
+    optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
     		create_gtl_proco(m_milp, lG, Kp, cost_fun=cost_fun, solve=True, 
-					maxIter=20, epsTol=1e-5, lamda=10, devM=0.5, rho0=1e-5, 
-					rho1=0.25, rho2=0.7, alpha=2.0, beta=3.5)
+					maxIter=20, epsTol=1e-5, lamda=100, devM=0.5, rho0=1e-2, 
+					rho1=0.75, rho2=0.95, alpha=2.0, beta=1.5,
+					timeLimit=5, n_thread=1, verbose=False, autotune=False)
+    print(ljRes)
+    print(optCost, status, solveTime)
+    maxDiff = 0
+    for s_id in swarm_ids:
+    	for n_id in node_ids:
+    		for t in range(Kp):
+    			s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
+    			# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+    			maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+    print(maxDiff)
