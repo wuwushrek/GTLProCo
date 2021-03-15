@@ -51,7 +51,7 @@ def update_opt_step_k(mOpt, xDen, MarkovM, initRange, dictConstr, trustRegion, x
 		given by xk and Mk
 	"""
 	# Set the constraint limits on M imposed by the trust region
-	for s_id in swarm_ids:
+	for s_id in swam_ids:
 		for n_id in node_ids:
 			for m_id in node_ids:
 				for t in range(Kp):
@@ -263,12 +263,13 @@ def get_cost_function(cost_fun, xDen, MarkovM, swam_ids, Kp, node_ids):
 	return costVal
 
 
-def create_minlp_model(util_funs, milp_expr, lG, Kp, cost_fun=None, addBilinear=True, solve=False):
+def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
+							cost_fun=None, addBilinear=True, solve=False):
 	# Obtain the milp encoding
-	(newCoeffs, newVars, rhsVals, nVar, timeVal), (lCoeffs, lVars, lRHS) = milp_expr
+	(newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS) = milp_expr
 
 	# Get the boolean and continuous variables from the MILP expressions of the GTL
-	bVars, rVars, lVars, denVars = getVars(newVars, timeVal, lVars)
+	bVars, rVars, lVars, denVars = getVars(newVars, lVars)
 
 	# Swarm and graph configuration information
 	swarm_ids = lG.eSubswarm.keys()
@@ -279,7 +280,11 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, cost_fun=None, addBilinear=
 	for s_id in swarm_ids:
 		for n_id in node_ids:
 			for t in range(Kp+1):
-				xDen[(s_id, n_id, t)] = util_funs['r']('x[{}][{}]({})'.format(s_id, n_id, t))
+				if t == 0 and init_den_lb is not None and init_den_ub is not None:
+					xDen[(s_id, n_id, t)] = util_funs['r']('x[{}][{}]({})'.format(s_id, n_id, t),
+												init_den_lb[(s_id, n_id)], init_den_ub[(s_id, n_id)])
+				else:
+					xDen[(s_id, n_id, t)] = util_funs['r']('x[{}][{}]({})'.format(s_id, n_id, t))
 	# mOpt.addVar(lb=0, ub=1, name='x[{}][{}]({})'.format(s_id, n_id, t))
 	
 	# Create the different Markov matrices
@@ -298,18 +303,18 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, cost_fun=None, addBilinear=
 	# mOpt.addVar(lb=0, ub=1, name='M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t))
 	
 	# Create the boolean variables from the GTL formula -> add them to the xDen dictionary
-	for (ind0, tInd) in bVars:
-		xDen[(ind0, tInd)] = util_funs['b']('b[{}]({})'.format(ind0, tInd))
+	for ind in bVars:
+		xDen[ind] = util_funs['b']('b[{}]'.format(ind[0]))
 		# mOpt.addVar(vtype=gp.GRB.BINARY, name='b[{}]({})'.format(ind0, tInd))
 
 	# Create the tempory real variables from the GTL formula -> add them to the xDen dictionary
-	for (ind0, tInd) in rVars:
-		xDen[(ind0, tInd)] = util_funs['r']('r[{}]({})'.format(ind0, tInd))
+	for ind in rVars:
+		xDen[ind] = util_funs['r']('r[{}]'.format(ind[0]))
 		# mOpt.addVar(lb=0, ub=1.0, name='r[{}]({})'.format(ind0, tInd))
 
 	# Create the binary variables from the loop constraint
-	for ind0 in lVars:
-		xDen[ind0] = util_funs['b']('l[{}]'.format(ind0))
+	for ind in lVars:
+		xDen[ind] = util_funs['b']('l[{}]'.format(ind[0]))
 		# mOpt.addVar(vtype=gp.GRB.BINARY, name='l[{}]'.format(ind0))
 
 	# Add the constraint on the density distribution
@@ -362,8 +367,8 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, cost_fun=None, addBilinear=
 	return optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids
 
 
-def create_minlp_gurobi(milp_expr, lG, Kp, cost_fun=None, solve=True, 
-						timeLimit=5, n_thread=0, verbose=False):
+def create_minlp_gurobi(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
+						cost_fun=None, solve=True, timeLimit=5, n_thread=0, verbose=False):
 	# Create the Gurobi model
 	mOpt = gp.Model('Bilinear MINLP formulation through GUROBI')
 	mOpt.Params.OutputFlag = verbose
@@ -392,11 +397,13 @@ def create_minlp_gurobi(milp_expr, lG, Kp, cost_fun=None, solve=True,
 	util_funs['solve'] = solve_f
 	util_funs['cost'] = set_cost
 	util_funs['opt'] = ret_sol
-	return create_minlp_model(util_funs, milp_expr, lG, Kp, addBilinear=True, cost_fun=cost_fun, solve=solve)
+	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub, 
+								addBilinear=True, cost_fun=cost_fun, solve=solve)
 	# mOpt.update()
 	# mOpt.display()
 
-def create_gtl_proco(milp_expr, lG, Kp, cost_fun=None, solve=True, 
+def create_gtl_proco(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
+					cost_fun=None, solve=True, 
 					maxIter=20, epsTol=1e-5, lamda=10, devM=0.5, rho0=1e-5, 
 					rho1=0.25, rho2=0.7, alpha=2.0, beta=3.5,
 					timeLimit=5, n_thread=0, verbose=True, autotune=True):
@@ -450,11 +457,13 @@ def create_gtl_proco(milp_expr, lG, Kp, cost_fun=None, solve=True,
 	util_funs['solve'] = solve_f
 	util_funs['cost'] = set_cost
 	util_funs['opt'] = ret_sol
-	return create_minlp_model(util_funs, milp_expr, lG, Kp, addBilinear=False, cost_fun=cost_fun, solve=solve)
+	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub, 
+								addBilinear=False, cost_fun=cost_fun, solve=solve)
 	# mOpt.update()
 	# mOpt.display()
 
-def create_minlp_scip(milp_expr, lG, Kp, cost_fun=None, solve=True,
+def create_minlp_scip(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
+						cost_fun=None, solve=True,
 						timeLimit=5, n_thread=0, verbose=False):
 	import pyscipopt as pSCIP
 	mOpt = pSCIP.Model('Bilinear MINLP formulation through SCIP')
@@ -482,10 +491,12 @@ def create_minlp_scip(milp_expr, lG, Kp, cost_fun=None, solve=True,
 	util_funs['solve'] = solve_f
 	util_funs['cost'] = set_cost
 	util_funs['opt'] = ret_sol
-	return create_minlp_model(util_funs, milp_expr, lG, Kp, addBilinear=True, cost_fun=cost_fun, solve=solve)
+	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub,
+								 addBilinear=True, cost_fun=cost_fun, solve=solve)
 	# mOpt.writeProblem('model')
 
-def create_minlp_pyomo(milp_expr, lG, Kp, cost_fun=None, solve=True, 
+def create_minlp_pyomo(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
+			cost_fun=None, solve=True, 
 			solver='couenne', solverPath='/home/fdjeumou/Documents/non_convex_solver/',
 			timeLimit=5, n_thread=0, verbose=False):
 	from pyomo.environ import Var, ConcreteModel, Constraint, NonNegativeReals, Binary, SolverFactory
@@ -537,7 +548,8 @@ def create_minlp_pyomo(milp_expr, lG, Kp, cost_fun=None, solve=True,
 	util_funs['solve'] = solve_f
 	util_funs['cost'] = set_cost
 	util_funs['opt'] = ret_sol
-	return create_minlp_model(util_funs, milp_expr, lG, Kp, addBilinear=True, cost_fun=cost_fun, solve=solve)
+	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub,
+								addBilinear=True, cost_fun=cost_fun, solve=solve)
 	# mOpt.pprint()
 
 

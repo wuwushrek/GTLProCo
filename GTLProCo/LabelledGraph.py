@@ -8,6 +8,8 @@ class LabelledGraph:
     G^s = (V, E^s) of each sub-swarm.
     The initialization of the class requires only the set of nodes V
     which corresponds to the bins  repartrion
+    ---VALUES -1, -2, AND -3 SHOULD NOT BE USED FOR NODE NAMES AS 
+       THEY ARE ALREADY USED FOR  IDENTIFICATION IN OUR PROGRAM---.
     :param V : a set of node names, the type doesn't matter as long as the names
                are used consistently
     """
