@@ -4,26 +4,24 @@ from abc import ABC, abstractmethod
 import itertools
 
 STRICT_INEQ = 1e-8
-BIG_M = 1e3
+BIG_M = 50
 N_VARS = 0
 BOOL_VAR = -1
 
 def create_gtl_constr(dictVar, milp_expr):
 	""" Return the constraints encoded by this milp_expression
+		This function is usually called by the optimization solver
 	"""
-	(newCoeffs, newVars, rhsVals, nVar, timeVal), (lCoeffs, lVars, lRHS) = milp_expr
+	(newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS) = milp_expr
 	# GTL formula constraints
 	resContr = list()
-	for nCoeffs, vs, rhsV, ts in zip(newCoeffs, newVars, rhsVals, timeVal):
+	for nCoeffs, vs, rhsV in zip(newCoeffs, newVars, rhsVals):
 		# (v[0], v[1], ts) if v[1] > BOOL_VAR else (v[0] if v[1] == BOOL_VAR-2 else (v[0], ts))
-		contrRepr = [c * dictVar[(v[0], v[1], ts) if v[1] > BOOL_VAR else \
-									(v[0] if v[1] == BOOL_VAR-2 else (v[0], ts))] \
-								for c, v in zip(nCoeffs, vs)]
+		contrRepr = [c * dictVar[v] for c, v in zip(nCoeffs, vs)]
 		resContr.append(sum(contrRepr) <= rhsV)
 	# Loop constraints
 	for nCoeffs, vs, rhsV in zip(lCoeffs, lVars, lRHS):
-		contrRepr = [c*dictVar[ v[0] if len(v) == 2 else v] \
-							for c, v in zip(nCoeffs, vs)]
+		contrRepr = [c*dictVar[v] for c, v in zip(nCoeffs, vs)]
 		resContr.append(sum(contrRepr) <= rhsV)
 	return resContr
 
@@ -41,15 +39,13 @@ def create_milp_constraints(listFormula, listNode, Kp, lG, initTime=0):
 	newCoeffs = list()
 	newVars = list()
 	rhsVals = list()
-	timeVal = list()
 
 	varsAnd = list()
 	for gtl, node in zip(listFormula, listNode):
-		nCoeffs, nVars, rhsVs, fEval, tVal = gtl.milp_repr(lG, node, initTime, Kp)
+		nCoeffs, nVars, rhsVs, fEval = gtl.milp_repr(lG, node, initTime, Kp)
 		newCoeffs.extend(nCoeffs)
 		newVars.extend(nVars)
 		rhsVals.extend(rhsVs)
-		timeVal.extend(tVal)
 		varsAnd.append(fEval)
 
 	# Add the last constraint AND constraint between each formula
@@ -58,7 +54,6 @@ def create_milp_constraints(listFormula, listNode, Kp, lG, initTime=0):
 		newCoeffs.extend(nCoeffs)
 		newVars.extend(nVars)
 		rhsVals.extend(rVals)
-		timeVal.extend([initTime for _ in range(len(nCoeffs))])
 	else:
 		nVar = varsAnd[0]
 
@@ -66,12 +61,10 @@ def create_milp_constraints(listFormula, listNode, Kp, lG, initTime=0):
 	newCoeffs.append([1])
 	newVars.append([nVar])
 	rhsVals.append(1)
-	timeVal.append(initTime)
 
 	newCoeffs.append([-1])
 	newVars.append([nVar])
 	rhsVals.append(-1)
-	timeVal.append(initTime)
 
 	# Add the constraint due to the loop
 	lCoeffs = list()
@@ -99,78 +92,73 @@ def create_milp_constraints(listFormula, listNode, Kp, lG, initTime=0):
 				lCoeffs.append(t2 + t1 + [BIG_M])
 				lVars.append(v1 + v2 + [(j,BOOL_VAR-2)])
 				lRHS.append(BIG_M)
-	return (newCoeffs, newVars, rhsVals, nVar, timeVal), (lCoeffs, lVars, lRHS)
+	return (newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS)
 
-def getVars(newVars, timeVal, lVars=list()):
+def getVars(newVars, lVars=list()):
 	"""
 	Return the boolean and continuous variables provided by the inputs
 	"""
-	assert len(newVars) == len(timeVal) # Sanity check
 	varBool = set()
 	varReal = set()
 	varL = set()
 	densDistr = set()
-	for vs, ts in zip(newVars, timeVal):
-		for (ind1, ind2) in vs:
-			if ind2 == BOOL_VAR:
-				varBool.add((ind1, ts))
-			elif ind2 == BOOL_VAR-1:
-				varReal.add((ind1, ts))
-			elif ind2 == BOOL_VAR-2:
-				varL.add(ind1)
+	for vs in newVars:
+		for v in vs:
+			if v[1] == BOOL_VAR:
+				varBool.add(v)
+			elif v[1] == BOOL_VAR-1:
+				varReal.add(v)
+			elif v[1] == BOOL_VAR-2:
+				varL.add(v)
 			else:
-				densDistr.add((ind1, ind2, ts))
+				densDistr.add(v)
 	for vs in lVars:
 		for ind in vs:
 			if ind[1] == BOOL_VAR-2:
-				varL.add(ind[0])
+				varL.add(ind)
 			else:
 				densDistr.add(ind)
 	return varBool, varReal, varL, densDistr
 
 
-def print_constr(newCoeffs, newVars, rhsVals, nVar, timeVal,
+def print_constr(newCoeffs, newVars, rhsVals, nVar,
 							lCoeffs=list(), lVars=list(), lRHS=list()):
 	"""
 		Provide a string representation of the MILP constraints
 		encoded by the given aruguments
 	"""
 	# Sanity check
-	assert len(newVars) == len(newCoeffs) and len(newVars) == len(timeVal) and \
-				len(newVars) == len(rhsVals)
+	assert len(newVars) == len(newCoeffs) and len(newVars) == len(rhsVals)
 	assert len(lCoeffs) == len(lVars) and len(lVars) == len(lRHS)
 
 	# Store the set of all variables of this MILP representation
-	varBool, varReal, varL, densDistr = getVars(newVars, timeVal, lVars)
+	varBool, varReal, varL, densDistr = getVars(newVars, lVars)
 	dictVar = dict()
-	for (ind1, ts) in varBool:
-		dictVar[(ind1, ts)] = 'b_{}({})'.format(ind1, ts)
-	for (ind1, ts) in varReal:
-		dictVar[(ind1, ts)] = 'r_{}({})'.format(ind1, ts)
-	for ind1 in varL:
-		dictVar[ind1] = 'l_{}'.format(ind1)
+	for ind in varBool:
+		dictVar[ind] = 'b_{}'.format(ind[0])
+	for ind in varReal:
+		dictVar[ind] = 'r_{}'.format(ind[0])
+	for ind in varL:
+		dictVar[ind] = 'l_{}'.format(ind[0])
 	for (ind1, ind2, ts) in densDistr:
 		dictVar[(ind1, ind2, ts)] = 'x_{}_{}({})'.format(ind1, ind2, ts)
 
 	# GTL formula constraints
 	resContr = list()
-	for nCoeffs, vs, rhsV, ts in zip(newCoeffs, newVars, rhsVals, timeVal):
-		# (v[0], v[1], ts) if v[1] > BOOL_VAR else (v[0] if v[1] == BOOL_VAR-2 else (v[0], ts))
-		contrRepr = ['{}*{}'.format(c, dictVar[(v[0], v[1], ts) if v[1] > BOOL_VAR else (v[0] if v[1] == BOOL_VAR-2 else (v[0], ts))]) \
-								for c, v in zip(nCoeffs, vs)]
+	for nCoeffs, vs, rhsV in zip(newCoeffs, newVars, rhsVals):
+		contrRepr = ['{}*{}'.format(c, dictVar[v]) for c, v in zip(nCoeffs, vs)]
 		sumRes = '{} <= {}'.format(' + '.join(contrRepr), rhsV)
 		resContr.append(sumRes)
 	# Loop constraints
 	lConstr = list()
 	for nCoeffs, vs, rhsV in zip(lCoeffs, lVars, lRHS):
-		contrRepr = ['{}*{}'.format(c, dictVar[ v[0] if len(v) == 2 else v]) \
-											for c, v in zip(nCoeffs, vs)]
+		contrRepr = ['{}*{}'.format(c, dictVar[v]) for c, v in zip(nCoeffs, vs)]
 		sumRes = '{} <= {}'.format(' + '.join(contrRepr), rhsV)
 		lConstr.append(sumRes)
 
 	# Start the printing formula
 	print('-------------------------')
-	print('Result variables: {}'.format(dictVar[(nVar[0],timeVal[-1])]))
+	print('Result variables: {}'.format(dictVar[nVar]))
 	print('-------------------------')
 	print('Boolean variables in {0,1}')
 	print(', '.join([dictVar[v] for v in varBool]))
@@ -194,7 +182,7 @@ def print_milp_repr(listFormula, listNode, Kp, lG, initTime=0):
 	"""
 		Return a string of the MILP representation of this GTL formula
 	"""
-	(newCoeffs, newVars, rhsVals, nVar, timeVal), (lCoeffs, lVars, lRHS) = \
+	(newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS) = \
 					create_milp_constraints(listFormula, listNode, Kp, lG, initTime)
 	# Start the printing formula
 	# print('--------------------------------------------------')
@@ -204,7 +192,7 @@ def print_milp_repr(listFormula, listNode, Kp, lG, initTime=0):
 	reprGTL = ', '.join(['{}'.format(gtl) for gtl in listFormula])
 	print ('At nodes {} and time index {} -- Length trajectory {}'.format(reprNode, initTime, Kp))
 	print(reprGTL)
-	print_constr(newCoeffs, newVars, rhsVals, nVar, timeVal, lCoeffs, lVars, lRHS)
+	print_constr(newCoeffs, newVars, rhsVals, nVar, lCoeffs, lVars, lRHS)
 
 def and_op(bVars):
 	""" 
@@ -363,7 +351,7 @@ class AtomicGTL(GTLFormula):
 		assert len(lG.getLabelMatRepr(node)[0]) ==  self.c.shape[0]
 
 		# Create the variable storing the result of the feasibility of this formula
-		nVar = (N_VARS, BOOL_VAR) # -1 means it is a boolean var and -2 means it is not
+		nVar = (N_VARS, BOOL_VAR-1) # -1 means it is a boolean var and -2 means it is not
 		N_VARS += 1	# Increment the number of new variables
 
 		# Get the MILP representation using the array repr of the linear label
@@ -373,8 +361,8 @@ class AtomicGTL(GTLFormula):
 		newCoeffs = list()
 		newVars = list()
 		rhsVal = list()
-		timeVal = list()
 
+		and_f = list()
 		# Add the new constraints
 		for cV, indexV, rhs in zip(coeffs, var, self.c):
 			tList1, iList1 = list(), list()
@@ -382,27 +370,34 @@ class AtomicGTL(GTLFormula):
 			for cvalue, (sId, nId) in zip(cV, indexV):
 				# Add the current coefficient and the variable that it multiplies
 				tList1.append(cvalue)
-				iList1.append((sId, nId))
+				iList1.append((sId, nId, t))
 				# Add the negation of the past constraint A x > b -> -Ax < -b
 				tList2.append(-cvalue)
-				iList2.append((sId, nId))
+				iList2.append((sId, nId, t))
+			nVarT = (N_VARS, BOOL_VAR) # -1 means it is a boolean var and -2 means it is not
+			N_VARS += 1	# Increment the number of new variables
 			# Add the term (1-P) phi
 			tList1.append(BIG_M)
-			iList1.append(nVar)
+			iList1.append(nVarT)
 			# Add the term -P phi
 			tList2.append(-BIG_M)
-			iList2.append(nVar)
+			iList2.append(nVarT)
 			# The right right side
 			rhsVal.append(rhs + BIG_M)
-			timeVal.append(t)
 			rhsVal.append(-rhs - STRICT_INEQ)
-			timeVal.append(t)
 			# Add the new coefficients and variables
 			newCoeffs.append(tList1)
 			newCoeffs.append(tList2)
 			newVars.append(iList1)
 			newVars.append(iList2)
-		return newCoeffs, newVars, rhsVal, nVar, timeVal
+			and_f.append(nVarT)
+		# Perform the and operation to ensure satisfaction of this atomic prop
+		nCoeffs, nVars, rVals, nVar = and_op(and_f)
+		# Add the last constraint
+		newCoeffs.extend(nCoeffs)
+		newVars.extend(nVars)
+		rhsVal.extend(rVals)
+		return newCoeffs, newVars, rhsVal, nVar
 
 class AndGTL(GTLFormula):
 	"""
@@ -431,24 +426,21 @@ class AndGTL(GTLFormula):
 		newCoeffs = list()
 		newVars = list()
 		rhsVals = list()
-		timeVal = list()
 
 		# Get the MILP representation using the array repr of the linear label
 		varsAnd = list()
 		for gtl in self.mFormula:
-			nCoeffs, nVars, rhsVs, fEval, tVal = gtl.milp_repr(lG, node, t, Kp)
+			nCoeffs, nVars, rhsVs, fEval = gtl.milp_repr(lG, node, t, Kp)
 			newCoeffs.extend(nCoeffs)
 			newVars.extend(nVars)
 			rhsVals.extend(rhsVs)
-			timeVal.extend(tVal)
 			varsAnd.append(fEval)
 		nCoeffs, nVars, rVals, nVar = and_op(varsAnd)
 		# Add the last constraint
 		newCoeffs.extend(nCoeffs)
 		newVars.extend(nVars)
 		rhsVals.extend(rVals)
-		timeVal.extend([t for _ in range(len(nCoeffs))])
-		return newCoeffs, newVars, rhsVals, nVar, timeVal
+		return newCoeffs, newVars, rhsVals, nVar
 
 class OrGTL(GTLFormula):
 	"""
@@ -477,24 +469,21 @@ class OrGTL(GTLFormula):
 		newCoeffs = list()
 		newVars = list()
 		rhsVals = list()
-		timeVal = list()
 
 		# Get the MILP representation using the array repr of the linear label
 		varsAnd = list()
 		for gtl in self.mFormula:
-			nCoeffs, nVars, rhsVs, fEval, tVal = gtl.milp_repr(lG, node, t, Kp)
+			nCoeffs, nVars, rhsVs, fEval = gtl.milp_repr(lG, node, t, Kp)
 			newCoeffs.extend(nCoeffs)
 			newVars.extend(nVars)
 			rhsVals.extend(rhsVs)
-			timeVal.extend(tVal)
 			varsAnd.append(fEval)
 		nCoeffs, nVars, rVals, nVar = or_op(varsAnd)
 		# Add the last constraint
 		newCoeffs.extend(nCoeffs)
 		newVars.extend(nVars)
 		rhsVals.extend(rVals)
-		timeVal.extend([t for _ in range(len(nCoeffs))])
-		return newCoeffs, newVars, rhsVals, nVar, timeVal
+		return newCoeffs, newVars, rhsVals, nVar
 
 class NotGTL(GTLFormula):
 	"""
@@ -522,19 +511,17 @@ class NotGTL(GTLFormula):
 		N_VARS += 1	# Increment the number of new variables
 
 		# Get the MILP representation of the formula after not operator
-		nCoeffs, nVars, rhsVs, fEval, tVal = self.rFormula.milp_repr(lG, node, t, Kp)
+		nCoeffs, nVars, rhsVs, fEval = self.rFormula.milp_repr(lG, node, t, Kp)
 
 		# Add the equality constraint by the NOT operator
 		nCoeffs.append([1,1])
 		nVars.append([nVar, fEval])
 		rhsVs.append(1)
-		tVal.append(t)
 
 		nCoeffs.append([-1,-1])
 		nVars.append([nVar, fEval])
 		rhsVs.append(-1)
-		tVal.append(t)
-		return nCoeffs, nVars, rhsVs, nVar, tVal
+		return nCoeffs, nVars, rhsVs, nVar
 
 class NextGTL(GTLFormula):
 	"""
@@ -564,22 +551,19 @@ class NextGTL(GTLFormula):
 		newCoeffs = list()
 		newVars = list()
 		rhsVals = list()
-		timeVal = list()
 
 		varsAnd = list()
 		for i in range(1, Kp+1):
-			nCoeffs, nVars, rhsVs, fEval, tVal = self.rFormula.milp_repr(lG, node, i, Kp)
+			nCoeffs, nVars, rhsVs, fEval = self.rFormula.milp_repr(lG, node, i, Kp)
 			newCoeffs.extend(nCoeffs)
 			newVars.extend(nVars)
 			rhsVals.extend(rhsVs)
-			timeVal.extend(tVal)
 
 			ljVar = (i, BOOL_VAR-2)
 			nCs, nVs, rs, nV = and_op([fEval, ljVar])
 			newCoeffs.extend(nCs)
 			newVars.extend(nVs)
 			rhsVals.extend(rs)
-			timeVal.extend([i for _ in range(len(nCs))])
 			varsAnd.append(nV)
 
 		nCoeffs, nVars, rVals, nVar = or_op(varsAnd)
@@ -588,8 +572,7 @@ class NextGTL(GTLFormula):
 		newCoeffs.extend(nCoeffs)
 		newVars.extend(nVars)
 		rhsVals.extend(rVals)
-		timeVal.extend([Kp for _ in range(len(nCoeffs))])
-		return newCoeffs, newVars, rhsVals, nVar, timeVal
+		return newCoeffs, newVars, rhsVals, nVar
 
 class AlwaysGTL(GTLFormula):
 	def __init__(self, rFormula):
@@ -612,18 +595,16 @@ class AlwaysGTL(GTLFormula):
 			# Get the MILP representation of the formula after Always operator
 			return self.rFormula.milp_repr(lG, node, t, Kp)
 
-		nC1, nV1, rhsVs1, fEval1, tVal1 = self.rFormula.milp_repr(lG, node, t, Kp)
-		nC2, nV2, rhsVs2, fEval2, tVal2 = self.milp_repr(lG, node, t+1, Kp)
+		nC1, nV1, rhsVs1, fEval1 = self.rFormula.milp_repr(lG, node, t, Kp)
+		nC2, nV2, rhsVs2, fEval2 = self.milp_repr(lG, node, t+1, Kp)
 		nC1.extend(nC2)
 		nV1.extend(nV2)
 		rhsVs1.extend(rhsVs2)
-		tVal1.extend(tVal2)
 		nCoeffs, nVars, rVals, nVar = and_op([fEval1, fEval2])
 		nC1.extend(nCoeffs)
 		nV1.extend(nVars)
 		rhsVs1.extend(rVals)
-		tVal1.extend([t for _ in range(len(nCoeffs))])
-		return nC1, nV1, rhsVs1, nVar, tVal1
+		return nC1, nV1, rhsVs1, nVar
 
 class EventuallyAlwaysGTL(GTLFormula):
 	"""
@@ -648,31 +629,27 @@ class EventuallyAlwaysGTL(GTLFormula):
 		newCoeffs = list()
 		newVars = list()
 		rhsVals = list()
-		timeVal = list()
 
 		orList = list()
 		for i in range(1,Kp+1):
 			lVar = [(i, BOOL_VAR-2)]
 			for j in range(i,Kp+1):
-				nCoeffs, nVars, rhsVs, fEval, tVal = \
+				nCoeffs, nVars, rhsVs, fEval = \
 					self.rFormula.milp_repr(lG, node, j, Kp)
 				newCoeffs.extend(nCoeffs)
 				newVars.extend(nVars)
 				rhsVals.extend(rhsVs)
-				timeVal.extend(tVal)
 				lVar.append(fEval)
 			nC1, nV1, rhsV1, nVar1 = and_op(lVar)
 			newCoeffs.extend(nC1)
 			newVars.extend(nV1)
 			rhsVals.extend(rhsV1)
-			timeVal.extend([i for _ in range(len(nC1))])
 			orList.append(nVar1)
 		nC1, nV1, rhsV1, nVar1 = or_op(orList)
 		newCoeffs.extend(nC1)
 		newVars.extend(nV1)
 		rhsVals.extend(rhsV1)
-		timeVal.extend([t for _ in range(len(nC1))])
-		return newCoeffs, newVars, rhsVals, nVar1, timeVal
+		return newCoeffs, newVars, rhsVals, nVar1
 
 class AlwaysEventuallyGTL(GTLFormula):
 	"""
@@ -697,31 +674,27 @@ class AlwaysEventuallyGTL(GTLFormula):
 		newCoeffs = list()
 		newVars = list()
 		rhsVals = list()
-		timeVal = list()
 
 		orList = list()
 		for i in range(1,Kp+1):
 			ljVar = (i, BOOL_VAR-2)
 			lVar = []
 			for j in range(i,Kp+1):
-				nCoeffs, nVars, rhsVs, fEval, tVal = \
+				nCoeffs, nVars, rhsVs, fEval = \
 					self.rFormula.milp_repr(lG, node, j, Kp)
 				newCoeffs.extend(nCoeffs)
 				newVars.extend(nVars)
 				rhsVals.extend(rhsVs)
-				timeVal.extend(tVal)
 				lVar.append(fEval)
 			nC1, nV1, rhsV1, nVar1 = or_op(lVar)
 			newCoeffs.extend(nC1)
 			newVars.extend(nV1)
 			rhsVals.extend(rhsV1)
-			timeVal.extend([i for _ in range(len(nC1))])
 
 			nC1, nV1, rhsV1, nVar1 = and_op([ljVar, nVar1])
 			newCoeffs.extend(nC1)
 			newVars.extend(nV1)
 			rhsVals.extend(rhsV1)
-			timeVal.extend([i for _ in range(len(nC1))])
 
 			orList.append(nVar1)
 
@@ -729,8 +702,7 @@ class AlwaysEventuallyGTL(GTLFormula):
 		newCoeffs.extend(nC1)
 		newVars.extend(nV1)
 		rhsVals.extend(rhsV1)
-		timeVal.extend([t for _ in range(len(nC1))])
-		return newCoeffs, newVars, rhsVals, nVar1, timeVal
+		return newCoeffs, newVars, rhsVals, nVar1
 
 class NeighborGTL(GTLFormula):
 	"""
@@ -760,30 +732,27 @@ class NeighborGTL(GTLFormula):
 		newCoeffs = list()
 		newVars = list()
 		rhsVals = list()
-		timeVal = list()
+
 		or_list = []
 		for lSubset in allSubset:
 			and_list = []
 			for v in lSubset:
-				nCoeffs, nVars, rhsVs, fEval, tVal = \
+				nCoeffs, nVars, rhsVs, fEval = \
 							self.rFormula.milp_repr(lG, v, t, Kp)
 				newCoeffs.extend(nCoeffs)
 				newVars.extend(nVars)
 				rhsVals.extend(rhsVs)
-				timeVal.extend(tVal)
 				and_list.append(fEval)
 			nC1, nV1, rhsV1, nVar1 = and_op(and_list)
 			newCoeffs.extend(nC1)
 			newVars.extend(nV1)
 			rhsVals.extend(rhsV1)
-			timeVal.extend([t for _ in range(len(nC1))])
 			or_list.append(nVar1)
 		nC1, nV1, rhsV1, nVar1 = or_op(or_list)
 		newCoeffs.extend(nC1)
 		newVars.extend(nV1)
 		rhsVals.extend(rhsV1)
-		timeVal.extend([t for _ in range(len(nC1))])
-		return newCoeffs, newVars, rhsVals, nVar1, timeVal
+		return newCoeffs, newVars, rhsVals, nVar1
 
 
 if __name__ == "__main__":
