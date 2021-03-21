@@ -124,7 +124,7 @@ def create_random_graph_and_reach_avoid_spec(nbNode, maxEdgePerNode, minWidth=0.
 if __name__ == "__main__":
 
 	from .gtlproco import create_minlp_gurobi, create_gtl_proco, create_reach_avoid_problem_convex
-	from .oldSDP import computeMforFixedV
+	# from .oldSDP import computeMforFixedV
 
 	# For printing the Graph
 	# import networkx as nx
