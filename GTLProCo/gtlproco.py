@@ -3,6 +3,7 @@ from .GTLformula import *
 
 # Import the optimizer tools
 import gurobipy as gp
+import cvxpy as cp
 import time
 
 def create_linearize_constr(mOpt, xDen, MarkovM, dictSlack, dictConstr, swam_ids, Kp, node_ids):
@@ -165,6 +166,7 @@ def sequential_optimization(mOpt, cost_fun, xDen, MarkovM, dictConstr, swam_ids,
 		Lk1 = mOpt.objVal
 		if Jk is None:
 			Jk = compute_actual_penalized_cost(cost_fun, lamda, dictXk, dictMk, swam_ids, Kp, node_ids)
+		# Jk, _ = compute_actual_penalized_cost(cost_fun, lamda, dictXk, dictMk, swam_ids, Kp, node_ids)
 		Jk1 = compute_actual_penalized_cost(cost_fun, lamda, dictXk1, dictMk1, swam_ids, Kp, node_ids)
 		deltaJk = Jk - Jk1
 		deltaLk = Jk - Lk1
@@ -185,11 +187,12 @@ def sequential_optimization(mOpt, cost_fun, xDen, MarkovM, dictConstr, swam_ids,
 			print('deltaJk : ', deltaJk)
 			print('deltaLk : ', deltaLk)
 			# print('Jk+1 : ', Jk1)
-		if rhok < rho0:
+		if rhok>0 and rhok < rho0:
 			rk = rk / alpha
 			continue
 
 		# Accept this step
+		# dictXk = trueXk
 		dictXk = dictXk1
 		dictMk = dictMk1
 		Jk = Jk1
@@ -282,7 +285,7 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 			for t in range(Kp+1):
 				if t == 0 and init_den_lb is not None and init_den_ub is not None:
 					xDen[(s_id, n_id, t)] = util_funs['r']('x[{}][{}]({})'.format(s_id, n_id, t),
-												init_den_lb[(s_id, n_id)], init_den_ub[(s_id, n_id)])
+												init_den_lb[s_id][n_id], init_den_ub[s_id][n_id])
 				else:
 					xDen[(s_id, n_id, t)] = util_funs['r']('x[{}][{}]({})'.format(s_id, n_id, t))
 	# mOpt.addVar(lb=0, ub=1, name='x[{}][{}]({})'.format(s_id, n_id, t))
@@ -347,7 +350,7 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 	xDictRes = dict()
 	MDictRes = dict()
 	ljRes = dict()
-	if solve and status ==1:
+	if solve and status == 1:
 		for s_id in swarm_ids:
 			for n_id in node_ids:
 				for t in range(Kp+1):
@@ -552,6 +555,276 @@ def create_minlp_pyomo(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 								addBilinear=True, cost_fun=cost_fun, solve=solve)
 	# mOpt.pprint()
 
+def create_reach_avoid_problem_lp(gtlFormulas, nodes, desDens, lG, cost_fun=None, cost_M = None, 
+					solve=True, timeLimit=5, n_thread=0, verbose=False):
+	""" Compute a solution of the LP problem (34) to (41). A solution of such a problem
+		provides a Markov Matrix that ensures the satisfcation of reach-avoid specifications
+	"""
+
+	# Create the optimization problem
+	mOpt = gp.Model('LP formulation for reach-avoid specs')
+	mOpt.Params.OutputFlag = verbose
+	mOpt.Params.Threads = n_thread
+	mOpt.Params.TimeLimit = timeLimit
+
+	# Swarm and graph configuration information
+	swarm_ids = lG.eSubswarm.keys()
+	node_ids = lG.V.copy()
+
+	# Create the different Markov matrices
+	MarkovM = dict()
+	for s_id in swarm_ids:
+		nedges = lG.getSubswarmNonEdgeSet(s_id)
+		for n_id in node_ids:
+			for m_id in node_ids:
+				if (m_id, n_id) in nedges: # Encode the motion constraints
+					MarkovM[(s_id, n_id, m_id)] = \
+						mOpt.addVar(lb=0, ub=0, name='M[{}][{}][{}]'.format(s_id, n_id, m_id))
+				else:
+					MarkovM[(s_id, n_id, m_id)] = \
+						mOpt.addVar(lb=0, name='M[{}][{}][{}]'.format(s_id, n_id, m_id))
+
+	# Add the Markov matrix constraints
+	for s_id in swarm_ids:
+		for n_id in node_ids:
+			mOpt.addConstr(sum([MarkovM[(s_id,m_id,n_id)] for m_id in node_ids]) == 1)
+
+	# Add the desired density constraint
+	for s_id, sDen in desDens.items():
+		for n_id, val in sDen.items():
+			mOpt.addConstr(sum([MarkovM[(s_id,n_id,m_id)]*sDen[m_id] for m_id in sDen]) == val)
+
+	# Add the constraints imposed by the safety formulas
+	A, b, indexShift = get_safe_encoding(lG, gtlFormulas, nodes, swarm_ids, node_ids)
+
+	# First add the variables Y
+	dictY = dict()
+	for i in range(b.shape[0]):
+		for j in range(b.shape[0]):
+			dictY[(i,j)] = mOpt.addVar(lb=-gp.GRB.INFINITY, ub=0, name='Y[{}][{}]'.format(i,j))
+
+	# Then add the S variable
+	dictS = dict()
+	for i in range(b.shape[0]):
+		for j in range(len(swarm_ids)):
+			dictS[(i,j)] = mOpt.addVar(lb=-gp.GRB.INFINITY, name='S[{}][{}]'.format(i,j))
+
+	# Define the big O matrix
+	dictO = dict()
+	for i in range(len(swarm_ids)):
+		for j in range(len(node_ids)*i, len(node_ids)*(i+1)):
+			dictO[(i,j)] = 1.0
+
+	# Define diagM
+	diagMDict  = dict()
+	for i in range(0, A.shape[1], len(node_ids)):
+		(s_id, node_rge) = indexShift[i]
+		for j, v1 in enumerate(node_rge):
+			for k, v2 in enumerate(node_rge):
+				diagMDict[(j+i, k+i )] = MarkovM[(s_id, v1, v2)]
+	
+	# Add the constraints
+	for i in range(b.shape[0]):
+		mOpt.addConstr(
+			sum([dictY[(i,j)]*b[j] for j in range(b.shape[0])]) + \
+			sum(dictS[(i,j)] for j in range(len(swarm_ids)))
+			>= -b[i]
+		)
+
+	for i in range(b.shape[0]):
+		for j in range(A.shape[1]):
+			t1 = sum( dictY[(i,k)]*A[k,j] for k in range(b.shape[0]))
+			t2 = sum( dictS[(i,k)]*dictO.get((k,j), 0) for k in range(len(swarm_ids)) )
+			t3 = sum( A[i,k]*diagMDict.get((k,j), 0) for k in range(A.shape[1]))
+			mOpt.addConstr(t1 + t2 <= - t3)
+
+	# mOpt.update()
+	# mOpt.display()
+
+	# Build the cost function
+	costVal = 0
+	if cost_fun is not None:
+		costVal += cost_fun(MarkovM, swarm_ids, node_ids)
+	if cost_M is None:
+		cost_M = dict()
+		for s_id in swarm_ids:
+			cost_M[s_id] = 1.0
+
+	# Add the coefficient of ergocity
+	dictMax = dict()
+	for s_id in swarm_ids:
+		dictMax[s_id] = list()
+		for n_id in node_ids:
+			for m_id in node_ids:
+				tempV = [mOpt.addVar(lb=0) for p in node_ids]
+				for p, tV in zip(node_ids, tempV):
+					mOpt.addConstr(tV >= MarkovM[(s_id, p,n_id)]-MarkovM[(s_id, p, m_id)])
+					mOpt.addConstr(-tV <= MarkovM[(s_id, p,n_id)]-MarkovM[(s_id, p, m_id)])
+				expVal = gp.quicksum([ tV for tV in tempV])
+				dictMax[s_id].append(expVal)
+	for s_id, cs in cost_M.items():
+		tV = mOpt.addVar(lb=0)
+		for contrV in dictMax[s_id]:
+			mOpt.addConstr(tV >= contrV)
+		costVal += 0.5*cs * tV
+
+	# Set the optimal cost
+	mOpt.setObjective(costVal)
+
+	optCost, status, solveTime = -np.inf, -1, 0
+
+	# Optimize of required
+	if solve:
+		c_t = time.time()
+		mOpt.optimize()
+		solveTime = time.time() - c_t
+		if mOpt.status == gp.GRB.OPTIMAL:
+			optCost, status, solveTime =  mOpt.objVal, 1, solveTime
+		elif mOpt.status == gp.GRB.TIME_LIMIT:
+			optCost, status, solveTime =  mOpt.objVal, -1, solveTime
+		else:
+			optCost, status, solveTime =  -np.inf, 0, solveTime
+
+	# Save the resulting Markov matrix
+	MDictRes = dict()
+	if solve and status == 1:
+		for s_id in swarm_ids:
+			for n_id in node_ids:
+				for m_id in node_ids:
+						MDictRes[(s_id, n_id, m_id)] = MarkovM[(s_id, n_id, m_id)].x
+
+	return optCost, status, solveTime, MDictRes
+
+def create_reach_avoid_problem_convex(gtlFormulas, nodes, desDens, lG, cost_fun=None, cost_M = None, 
+					solve=True, timeLimit=5, n_thread=0, verbose=False, sdp_solver=True):
+	""" Compute a solution of the LP problem (34) to (41). A solution of such a problem
+		provides a Markov Matrix that ensures the satisfcation of reach-avoid specifications
+	"""
+
+	# Swarm and graph configuration information
+	swarm_ids = lG.eSubswarm.keys()
+	node_ids = lG.V.copy()
+
+	# List of constraints
+	pbConstr = list()
+
+	# Create the different Markov matrices
+	MarkovM = dict()
+	for s_id in swarm_ids:
+		MarkovM[s_id] = cp.Variable((len(node_ids), len(node_ids)), nonneg=True)
+		nedges = lG.getSubswarmNonEdgeSet(s_id)
+		for i, n_id in enumerate(node_ids):
+			for j, m_id in enumerate(node_ids):
+				if (m_id, n_id) in nedges: # Encode the motion constraints
+					pbConstr.append(MarkovM[s_id][i, j] == 0)
+
+	# Add the Markov matrix constraints
+	for s_id in swarm_ids:
+		pbConstr.append(np.ones(len(node_ids))@MarkovM[s_id] == np.ones(len(node_ids)))
+
+	# Add the desired density constraint
+	for s_id, sDen in desDens.items():
+		vs = np.array([sDen[n_id] for i, n_id in enumerate(node_ids)])
+		pbConstr.append(MarkovM[s_id] @ vs == vs)
+
+	# Add the constraints imposed by the safety formulas
+	A, b, indexShift = get_safe_encoding(lG, gtlFormulas, nodes, swarm_ids, node_ids)
+
+	# First add the variables Y
+	Ym = cp.Variable((b.shape[0], b.shape[0]), nonpos=True)
+
+	# Then add the S variable
+	Sm = cp.Variable((b.shape[0], len(swarm_ids)))
+
+	# Define the big O matrix
+	Om = np.zeros((len(swarm_ids), len(node_ids)*len(swarm_ids)))
+	for i, s_id in enumerate(swarm_ids):
+		Om[i,len(node_ids)*i:len(node_ids)*(i+1)] = 1.0
+
+	# Define diagM
+	diagMl  = list()
+	for i in range(0, A.shape[1], len(node_ids)):
+		(s_id, node_rge) = indexShift[i]
+		rowList = list()
+		for j, v1 in enumerate(node_rge):
+			colList = [0 for _ in range(i)]
+			for k, v2 in enumerate(node_rge):
+				colList.append(MarkovM[s_id][j, k])
+			colList.extend([0 for _ in range(i+len(node_ids), len(node_ids)*len(swarm_ids))])
+			rowList.append(colList)
+		diagMl.extend(rowList)
+	diagM = cp.bmat(diagMl)
+	
+	# Add the constraints
+	pbConstr.append(Ym @ b + Sm @ np.ones(len(swarm_ids)) >= -b)
+	pbConstr.append(Ym @ A + Sm @ Om + A @ diagM <= 0)
+
+
+	# Build the cost function
+	costVal = 0
+	if cost_fun is not None:
+		costVal += cost_fun(MarkovM, swarm_ids, node_ids)
+
+	if cost_M is None:
+		cost_M = dict()
+		for s_id in swarm_ids:
+			cost_M[s_id] = 1.0
+
+	if sdp_solver:
+		for s_id, cs in cost_M.items():
+			Ms = MarkovM[s_id]
+			qinv = np.zeros((len(node_ids), len(node_ids)))
+			qval = np.zeros((len(node_ids), len(node_ids)))
+			rval =  np.zeros((1, len(node_ids)))
+			for i, n_id in enumerate(node_ids):
+				rval[0,i] = np.sqrt(desDens[s_id][n_id])
+				qinv[i,i] = 0 if rval[0,i] < 1e-9 else (1.0/rval[0,i])
+				qval[i,i] = rval[0,i]
+			costVal += cs * cp.norm(qinv @ Ms @ qval - rval.T @ rval)
+	else:
+		for s_id, cs in cost_M.items():
+			listMaxM = list()
+			Ms = MarkovM[s_id]
+			for i, n_id in enumerate(node_ids):
+				colList = list()
+				for j, m_id in enumerate(node_ids):
+					colList.append(cp.norm(Ms[:,i]-Ms[:,j],1))
+				listMaxM.append(colList)
+			costVal += 0.5 * cs * cp.max(cp.bmat(listMaxM))
+
+	# Set the optimal cost
+	objVal = cp.Minimize(costVal)
+	prob = cp.Problem(objVal, pbConstr)
+
+	optCost, status, solveTime = -np.inf, -1, 0
+
+	# Optimize of required
+	if solve:
+		if sdp_solver:
+			import mosek
+			prob.solve(solver=cp.MOSEK, verbose=verbose, 
+						mosek_params={mosek.dparam.optimizer_max_time:timeLimit, 
+								mosek.iparam.intpnt_solve_form:mosek.solveform.dual,
+								mosek.iparam.num_threads:n_thread})
+		else:
+			opts = {'Threads' : n_thread, 'TimeLimit' : timeLimit}
+			prob.solve(solver=cp.GUROBI, verbose=verbose, **opts)
+		if prob.status == cp.OPTIMAL:
+			optCost, status, solveTime =  prob.value, 1, prob.solver_stats.solve_time
+		elif prob.status == cp.SOLVER_ERROR:
+			optCost, status, solveTime =  prob.value, -1, prob.solver_stats.solve_time
+		else:
+			optCost, status, solveTime =  -np.inf, 0, prob.solver_stats.solve_time
+
+	# Save the resulting Markov matrix
+	MDictRes = dict()
+	if solve and status == 1:
+		for s_id in swarm_ids:
+			for i, n_id in enumerate(node_ids):
+				for j, m_id in enumerate(node_ids):
+						MDictRes[(s_id, n_id, m_id)] = MarkovM[s_id][i, j].value
+
+	return optCost, status, solveTime, MDictRes
 
 if __name__ == "__main__":
     """

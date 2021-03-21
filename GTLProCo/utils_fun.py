@@ -5,11 +5,12 @@ import numpy as np
 import random
 import gurobi as gp
 
-def random_connected_graph(nbNode, maxEdgePerNode):
+def random_connected_graph(nbNode, maxEdgePerNode, scrambling=False):
 	""" Generate a connected graph with each node having a maximum 
 		number of edge specified by maxEdgePerNode.
 		:param nbNode : Number of node of the graph
 		:maxEdgePerNode : Maximum number of edge per node
+		:scrambling : Enable the graph to have a scrambling pattern
 	"""
 	nodeSet = set ([i for i in range(nbNode)])
 	source = np.random.randint(low=0, high=nbNode)
@@ -41,11 +42,25 @@ def random_connected_graph(nbNode, maxEdgePerNode):
 		nextN = np.random.choice(np.array(list(nodeSet)), nEdge, replace=False)
 		for v in nextN:
 			resEdge.add((u,v))
+
+	# In case a scrambling graph is not asked for, return
+	if not scrambling:
+		return nodeSet, resEdge
+
+	# If a scramblng pattern is asked, return one in a random way
+	lSet = np.array(list(nodeSet))
+	for u in nodeSet:
+		for v in nodeSet:
+			z = np.random.choice(lSet, 1)[0]
+			resEdge.add((u, z))
+			resEdge.add((v, z))
+
 	return nodeSet, resEdge
 
 def add_bounded_label_constr(lG):
 	""" Label a given graph with node label [x, -x] in order to enforce
 		time evolution demsity constraints
+		:param lG : A labelled graph 
 	"""
 	for s_id in lG.eSubswarm:
 		for n_id in lG.V:
@@ -54,75 +69,102 @@ def add_bounded_label_constr(lG):
 				-getattr(lG, 'x_{}_{}'.format(s_id, n_id))])
 
 
-def create_random_graph_and_reach_avoid_spec(nbNode, maxEdgePerNode, minWidth=0.1):
+def create_random_graph_and_reach_avoid_spec(nbNode, maxEdgePerNode, minWidth=0.1, scrambling=True):
 	""" Create a random graph with the number of node specified by nbNode
 		and the maximum number of edge per node specified by maxEdgePerNode.
 		Further the graph is labelled with the density of the unique swarm
 		at each node.
 		Besides, Eventually always (reach) and Always Eventually formula
 		are applied to each node as the GTL formula to satisfied
+		:param nbNode : Number of node of the graph
+		:maxEdgePerNode : Maximum number of edge per node
+		:minWidth : Minimum diameter of the ramdom safe set
+		:scrambling : Enable the graph to have a scrambling pattern
 	"""
-	nodeSet, resEdge = random_connected_graph(nbNode, maxEdgePerNode)
+	nodeSet, resEdge = random_connected_graph(nbNode, maxEdgePerNode, scrambling)
+
 	# Create the node label
 	lG = LabelledGraph(nodeSet)
+
 	# Add a single subswarm to the swarm
 	lG.addSubswarm(0, resEdge)
+
 	# Add the label of each node in the graph
 	add_bounded_label_constr(lG)
 	probV = np.random.rand(nbNode)
 	probV = probV / sum(probV)
 	safeSet_lb = np.random.uniform(low=np.zeros(nbNode), high=probV)
 	safeSet_ub = np.random.uniform(low=np.minimum(probV+minWidth,1), high=np.full(nbNode, 1.0))
+	
 	# Pick a random desired distribution inside the safe set
-	mOpt = gp.Model('Vector with constraint and sum to 1')
+	mOpt = gp.Model('Vector with constraints and sum to 1')
 	mOpt.Params.OutputFlag = False
 	xV = [mOpt.addVar(lb=safeSet_lb[i], ub=safeSet_ub[i]) for i in range(nbNode)]
 	mOpt.addConstr(sum(xV) == 1)
 	mOpt.setObjective(sum((xv - s_lb)*(xv - s_lb) for (xv,s_lb) in zip(xV, safeSet_lb)))
 	mOpt.optimize()
-	initPoint = { (0, v) : xv.x for v, xv in enumerate(xV)}
+	initPoint = { 0 : {v : xv.x for v, xv in enumerate(xV)}}
 
 	mOpt.setObjective(sum((xv - s_lb)*(xv - s_lb) for (xv,s_lb) in zip(xV, safeSet_ub)))
 	mOpt.optimize()
-	desPoint = { (0, v) : xv.x for v, xv in enumerate(xV)}
+	desPoint = { 0 : {v : xv.x for v, xv in enumerate(xV)}}
 
-	# print (initPoint)
-	# print(desPoint)
 	# Build the GTL formula at each node
 	dictAtomicSafe= dict()
 	dictAtomicDes = dict()
 	dictFormula = dict()
-	k=0
+
 	for v in nodeSet:
 		dictAtomicSafe[v] = AtomicGTL([safeSet_ub[v], -safeSet_lb[v]])
-		dictAtomicDes[v] = AtomicGTL([desPoint[(0,v)], -desPoint[(0,v)]])
+		dictAtomicDes[v] = AtomicGTL([desPoint[0][v], -desPoint[0][v]])
 		dictFormula[v] = AndGTL([AlwaysGTL(dictAtomicSafe[v]), EventuallyAlwaysGTL(dictAtomicDes[v])])
 	return lG, list(dictFormula.values()), list(dictFormula.keys()), dictAtomicSafe, initPoint, desPoint
 
 
 if __name__ == "__main__":
-	from .gtlproco import create_minlp_gurobi, create_gtl_proco
-	# np.random.seed(201)
+
+	from .gtlproco import create_minlp_gurobi, create_gtl_proco, create_reach_avoid_problem_convex
+	from .oldSDP import computeMforFixedV
+
+	# For printing the Graph
+	# import networkx as nx
+	# from networkx.drawing.nx_pydot import write_dot
+	# import matplotlib.pyplot as plt
+
+	np.random.seed(401)
 	nNode = 30
 	nEdge = np.random.randint(2, 3)
 	Kp = 10
-	lG, gtl, nodes, safeGTL, initPoint, desPoint = create_random_graph_and_reach_avoid_spec(nNode, nEdge)
+	lG, gtl, nodes, safeGTL, initPoint, desPoint = \
+		create_random_graph_and_reach_avoid_spec(nNode, nEdge, scrambling=True)
+
+	# G = nx.Graph()
+	# G.add_nodes_from(lG.V)
+	# G.add_edges_from(lG.E)
+	# pos = nx.nx_agraph.graphviz_layout(G)
+	# nx.draw(G, pos=pos)
+	# write_dot(G, 'file.dot')
+	# plt.show()
+	# exit()
+
 	# print_milp_repr(gtl, nodes, Kp, lG, initTime=0)
 	m_milp = create_milp_constraints(gtl, nodes, Kp, lG)
+
+	# Create the cost function for the MINLP solvers
 	def cost_fun(xDict, MDict, swarm_ids, node_ids):
 		costValue = 0
 		for s_id in swarm_ids:
 			for n_id in node_ids:
-				for m_id in node_ids:
-					costValue += MDict[(s_id, n_id, m_id)]
+					costValue += (1-MDict[(s_id, n_id, n_id)])
 		return costValue
-	# cost_fun = None
+	cost_fun = None
 
+	# Use GTLproco Sewuential solver
 	optCost, status, solveTime, xDictRes, MdictRes, ljRes, swarm_ids, node_ids = \
 		create_gtl_proco(m_milp, lG, Kp, initPoint, initPoint, cost_fun=cost_fun, solve=True, 
-					maxIter=20, epsTol=1e-5, lamda=1, devM=1, rho0=1e-2, 
-					rho1=0.75, rho2=0.95, alpha=3.0, beta=1.5,
-					timeLimit=5, n_thread=0, verbose=False, autotune=False)
+					maxIter=100, epsTol=1e-3, lamda=100, devM=1, rho0=1e-3, 
+					rho1=0.75, rho2=0.95, alpha=3.0, beta=3,
+					timeLimit=50, n_thread=0, verbose=True, autotune=False)
 	print(ljRes)
 	print(optCost, status, solveTime)
 	maxDiff = 0
@@ -134,9 +176,10 @@ if __name__ == "__main__":
 				maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
 	print('Max diff = ', maxDiff)
 
+	# Use GUROBI Bilinear solver
 	optCost, status, solveTime, xDictRes, MdictRes, ljRes, swarm_ids, node_ids = \
 		create_minlp_gurobi(m_milp, lG, Kp, initPoint, initPoint, 
-			cost_fun=cost_fun, timeLimit=5, n_thread=0, verbose=False)
+			cost_fun=cost_fun, timeLimit=50, n_thread=0, verbose=True)
 	print(ljRes)
 	print(optCost, status, solveTime)
 	maxDiff = 0
@@ -147,12 +190,40 @@ if __name__ == "__main__":
 				s = sum(MdictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
 				maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
 	print('Max diff = ', maxDiff)
+
+	# Use the convex solver in case of scrambling pattern
+	def cost_fun(xDict, MDict, swarm_ids, node_ids):
+		costValue = 0
+		for s_id in swarm_ids:
+			for i, n_id in enumerate(node_ids):
+					costValue += (1-MDict[s_id][i, i])
+		return costValue
+	cost_fun = None
+	optCost, status, solveTime, MDictRes = \
+		create_reach_avoid_problem_convex(safeGTL.values(), safeGTL.keys(), desPoint, lG, 
+			cost_fun=None, cost_M = None, solve=True, timeLimit=50, n_thread=0, verbose=True,
+			sdp_solver=True)
+	print(optCost, status, solveTime)
+	print('Max diff = ', 0)
+
 	# print('Desired Density : ', desPoint)
-	# for s_id in swarm_ids:
-	# 	for t in range(Kp+1):
-	# 		xt = np.zeros(nNode)
-	# 		for n_id in node_ids:
-	# 			xt[n_id] = xDictRes[(s_id, n_id, t)]
-	# 		print ('S_id: {}, Time: {}, {}'.format(s_id, t, xt))
-			# for m_id in node_ids:
-			# 	print('M[{}][{}] = {}'.format(n_id, m_id, MdictRes[(s_id, n_id, m_id, 4)]))
+	Mmat = np.zeros((len(node_ids), len(node_ids)))
+	for i, n_id in enumerate(node_ids):
+		for j, m_id in enumerate(node_ids):
+			Mmat[i,j] = MDictRes[(0, n_id, m_id)]
+	assert np.max(np.ones(len(node_ids)) @ Mmat - np.ones(len(node_ids))) <= 1e-6
+	currPos = np.array([ initPoint[0][n_id] for i, n_id in enumerate(node_ids)])
+	desPoint = np.array([ desPoint[0][n_id] for i, n_id in enumerate(node_ids)])
+
+	print('Desired Density : ', desPoint)
+	print ('S_id: {}, Time: {}, {}'.format(0, 0, currPos))
+	# Check if the specifications are satisfied
+	for t in range(100000):
+		currPos = Mmat @ currPos
+		for k, v in safeGTL.items():
+			# print (currPos[k], -v.c[1], v.c[0])
+			assert currPos[k]- v.c[0] <= 1e-5 and currPos[k] + v.c[1] >= -1e-5
+		# print ('S_id: {}, Time: {}, {}'.format(0, t+1, currPos))
+		if np.linalg.norm(desPoint-currPos) < 1e-5:
+			print (t, currPos)
+			break

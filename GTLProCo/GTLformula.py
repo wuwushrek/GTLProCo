@@ -303,6 +303,33 @@ def get_neighbors(lG, node, k):
 				nRes.append(s1)
 	return nRes
 
+def get_safe_encoding(lG, gtlFormulas, nodes, swarm_ids, node_ids):
+	indexShift = dict()
+	invCurrIndex = dict()
+	for i, s_id in enumerate(swarm_ids):
+		indexShift[i*len(node_ids)] = (s_id, [n_id for j, n_id in enumerate(node_ids)])
+		for k, n_id in enumerate(node_ids):
+			invCurrIndex[(s_id, n_id)] = i*len(node_ids) + k
+	# Now extract the LP representation from the safe formula
+	Amat = None
+	bmat = None
+	for piGTL, n_id in zip(gtlFormulas, nodes):
+		assert isinstance(piGTL, AtomicGTL), " Not an atomic proposition"
+		assert len(lG.getLabelMatRepr(n_id)[0]) ==  piGTL.c.shape[0]
+		(coeffList, indexList) = lG.getLabelMatRepr(n_id)
+		At = np.zeros((piGTL.c.shape[0], len(node_ids)*len(swarm_ids)))
+		bt = piGTL.c
+		for ind, cL, iL in zip(range(len(coeffList)), coeffList, indexList):
+			for c, (s_id, n_id) in zip(cL, iL):
+				At[ind, invCurrIndex[(s_id,n_id)]] = c
+		if Amat is None or bmat is None:
+			Amat = At
+			bmat = bt
+		else:
+			Amat = np.concatenate((Amat, At))
+			bmat = np.concatenate((bmat, bt))
+	return Amat, bmat, indexShift
+
 class GTLFormula(ABC):
 	"""
 		Abstract base  class that represents an infinite horizon GTL
