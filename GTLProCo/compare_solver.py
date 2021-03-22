@@ -10,6 +10,7 @@ from .gtlproco import create_minlp_scip
 from .gtlproco import create_minlp_pyomo
 from .gtlproco import create_gtl_proco
 from .gtlproco import create_reach_avoid_problem_convex
+from .gtlproco import create_reach_avoid_problem_lp
 
 # Save the path for the non convex solver of pyomo
 pyomo_path = "/home/fdjeumou/Documents/non_convex_solver/"
@@ -18,7 +19,7 @@ def solve_problem(solver_name, pb_infos):
 	global pyomo_path
 
 	lG, gtl, nodes, safeGTL, initPoint, desPoint, m_milp, Kp = pb_infos
-	timeL = 20 # 5 min
+	timeL = 60*5 # 5 min
 	n_thread = 0 # Solver decides the number of thread
 	verb = False
 	costF = None
@@ -54,9 +55,9 @@ def solve_problem(solver_name, pb_infos):
 		swarm_ids = swarm_ids = lG.eSubswarm.keys()
 		node_ids = lG.V.copy()
 		optCost, status, solveTime, MDictRes = \
-			create_reach_avoid_problem_convex(safeGTL.values(), safeGTL.keys(), desPoint, lG, 
+			create_reach_avoid_problem_lp(safeGTL.values(), safeGTL.keys(), desPoint, lG, 
 				cost_fun=costF, cost_M=None, solve=True, timeLimit=timeL, 
-				n_thread=n_thread, verbose=verb, sdp_solver=False)
+				n_thread=n_thread, verbose=verb)
 	else:
 		assert False, " Solver not implemented "
 
@@ -77,11 +78,11 @@ def solve_problem(solver_name, pb_infos):
 
 # Set seed for reproductibility
 # np.random.seed(401)
-solverList = ['GTLProco', 'GTLProco_SDP', 'GTLProco_LP', 'Gurobi_MINLP', 'SCIP', 'couenne', 'bonmin']
-maxPS = 11
+solverList = ['GTLProco', 'GTLProco_SDP', 'Gurobi_MINLP', 'SCIP', 'couenne', 'bonmin']
+maxPS = 101
 sizeProblem = [ i for i in range(5, maxPS, 5)]
 timeHorizon = [ 10 + int(i/10.0) for i in range(5, maxPS, 5)]
-nbTry = 1
+nbTry = 10
 
 save_dir = 'exp_results'
 dictRes = dict()
@@ -90,17 +91,22 @@ for _ in range(nbTry):
 	setNotToSolve = set()
 	for sizePb, Kp in zip(sizeProblem, timeHorizon):
 		lG, gtl, nodes, safeGTL, initPoint, desPoint = \
-			create_random_graph_and_reach_avoid_spec(sizePb, 5)
+			create_random_graph_and_reach_avoid_spec(sizePb, 5, True)
 		m_milp = create_milp_constraints(gtl, nodes, Kp, lG)
 		params_solver = (lG, gtl, nodes, safeGTL, initPoint, desPoint, m_milp, Kp)
 		for solver_name in solverList:
 			if solver_name in setNotToSolve:
 				continue
-			res = solve_problem(solver_name, params_solver)
-			if solver_name not in dictRes:
-				dictRes[solver_name] = res
-			else:
-				dictRes[solver_name] = np.concatenate((dictRes[solver_name],res))
-			if res[0,1] == -1: # Time Limit elapsed
+			try:
+				res = solve_problem(solver_name, params_solver)
+				if solver_name not in dictRes:
+					dictRes[solver_name] = res
+				else:
+					dictRes[solver_name] = np.concatenate((dictRes[solver_name],res))
+				if res[0,1] == -1: # Time Limit elapsed
+					setNotToSolve.add(solver_name)
+			except:
 				setNotToSolve.add(solver_name)
+				print('Error occured : {}, Size : {}, Kp : {}'.format(solver_name, sizePb, Kp))
+
 		np.savez(save_dir, **dictRes)
