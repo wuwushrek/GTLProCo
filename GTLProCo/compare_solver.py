@@ -77,12 +77,12 @@ def solve_problem(solver_name, pb_infos):
 	return np.array([len(node_ids), status, optCost, solveTime, maxDiff]).reshape(1,-1)
 
 # Set seed for reproductibility
-# np.random.seed(401)
-solverList = ['GTLProco', 'GTLProco_SDP', 'Gurobi_MINLP', 'SCIP', 'couenne', 'bonmin']
-maxPS = 101
+np.random.seed(401)
+solverList = ['GTLProco', 'GTLProco_SDP', 'GTLProco_LP', 'Gurobi_MINLP', 'SCIP', 'couenne', 'bonmin']
+maxPS = 151
 sizeProblem = [ i for i in range(5, maxPS, 5)]
-timeHorizon = [ 10 + int(i/10.0) for i in range(5, maxPS, 5)]
-nbTry = 10
+timeHorizon = [ np.maximum(10 + int(i/10.0),20) for i in range(5, maxPS, 5)]
+nbTry = 20
 
 save_dir = 'exp_results'
 dictRes = dict()
@@ -105,6 +105,10 @@ for _ in range(nbTry):
 					dictRes[solver_name] = np.concatenate((dictRes[solver_name],res))
 				if res[0,1] == -1: # Time Limit elapsed
 					setNotToSolve.add(solver_name)
+				# Don't run the sdp or lp if they take more time than the sequential solver
+				if solver_name == 'GTLProco_SDP' or solver_name == 'GTLProco_LP':
+					if res[0,-2] > dictRes['GTLProco'][-1,-2]:
+						setNotToSolve.add(solver_name)
 			except:
 				setNotToSolve.add(solver_name)
 				print('Error occured : {}, Size : {}, Kp : {}'.format(solver_name, sizePb, Kp))
