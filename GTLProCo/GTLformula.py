@@ -3,15 +3,23 @@ from .LabelledGraph import LabelledGraph
 from abc import ABC, abstractmethod
 import itertools
 
+# Tolerance to transform strict inequality (< or >) to non-strict inequalities (<= or >=)
 STRICT_INEQ = 1e-8
+# Scalar value involved when doing Big-M relaxation
 BIG_M = 50
+# Global variable to count the number of temporary variables introduced when building the MILP expression for a GTL specs
 N_VARS = 0
+# Specify if a new variable is a boolean BOOL_VAR, a real BOOL_VAR-1, or a loop variable BOOL_VAR-2
 BOOL_VAR = -1
 
 def create_gtl_constr(dictVar, milp_expr):
-	""" Return the constraints encoded by this milp_expression
-		This function is usually called by the optimization solver
+	""" Return a symbolic representation of the constraints encoded by this milp_expression
+		This function is usually called by the optimization solver Gurobi, SCIP, Couenne etc...
+		:param dictVar : A dictionary containing a symbolic expression of the density distribution, the
+							boolean variables in the milp, and the real variables in the milp
+		:param milp_expr : The milp expression representing the GTL FORMULA
 	"""
+	# Parse the MILP expression
 	(newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS) = milp_expr
 	# GTL formula constraints
 	resContr = list()
@@ -32,6 +40,11 @@ def create_milp_constraints(listFormula, listNode, Kp, lG, initTime=0):
 		and the corresponding nodes.
 		The MILP should be an equivalent formulation for satisfaction
 		of each formula at each node at time 0
+		:param listFormula : List of GTL formulas
+		:param listNode : List of node for satisfaction of each GTL formula
+		:param Kp : The loop time horizon
+		:param lG : The labelled graph
+		:param initTime : THe time at which the specifications must be satisfied
 	"""
 	assert isinstance(listFormula, list) and isinstance(listNode, list), "Argument should be a list"
 	assert len(listFormula) == len(listNode), "Different list length between formulas and nodes"
@@ -71,6 +84,7 @@ def create_milp_constraints(listFormula, listNode, Kp, lG, initTime=0):
 	lVars = list()
 	lRHS = list()
 
+	# Sum_i l_i == 1
 	lCoeffs.append([1 for i in range(1, Kp+1)])
 	lVars.append([ (i, BOOL_VAR-2) for i in range(1,Kp+1)])
 	lRHS.append(1)
@@ -78,6 +92,7 @@ def create_milp_constraints(listFormula, listNode, Kp, lG, initTime=0):
 	lVars.append([ (i, BOOL_VAR-2) for i in range(1,Kp+1)])
 	lRHS.append(-1)
 
+	# Add the loop constraints
 	for node in listNode:
 		(coeffs, var) = lG.getLabelMatRepr(node)
 		for j in range(1, Kp+1):
@@ -95,8 +110,9 @@ def create_milp_constraints(listFormula, listNode, Kp, lG, initTime=0):
 	return (newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS)
 
 def getVars(newVars, lVars=list()):
-	"""
-	Return the boolean and continuous variables provided by the inputs
+	""" Return the set of boolean and continuous variables provided store in newVars ( output of the milp expression of a GTL formula)
+		:param newVars : Set of variables in the milp expression of a GTL constraint
+		:param lVars : Set of loop variables
 	"""
 	varBool = set()
 	varReal = set()
@@ -125,7 +141,7 @@ def print_constr(newCoeffs, newVars, rhsVals, nVar,
 							lCoeffs=list(), lVars=list(), lRHS=list()):
 	"""
 		Provide a string representation of the MILP constraints
-		encoded by the given aruguments
+		encoded by the given arguments
 	"""
 	# Sanity check
 	assert len(newVars) == len(newCoeffs) and len(newVars) == len(rhsVals)
@@ -179,8 +195,7 @@ def print_constr(newCoeffs, newVars, rhsVals, nVar,
 	print('\n'.join(lConstr))
 
 def print_milp_repr(listFormula, listNode, Kp, lG, initTime=0):
-	"""
-		Return a string of the MILP representation of this GTL formula
+	""" Return a string of the MILP representation of this GTL formula
 	"""
 	(newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS) = \
 					create_milp_constraints(listFormula, listNode, Kp, lG, initTime)
@@ -304,16 +319,24 @@ def get_neighbors(lG, node, k):
 	return nRes
 
 def get_safe_encoding(lG, gtlFormulas, nodes, swarm_ids, node_ids):
+	""" Return an LP encoding of a safe GTL specification (ALways fomula)
+		:param lG : The labelled graph
+		:param gtlFormulas : The set of safe GTL formula
+		:param nodes : The set of nodes at which the GTL formulas must be satisified
+	"""
+	# Make a correct indexing
 	indexShift = dict()
 	invCurrIndex = dict()
 	for i, s_id in enumerate(swarm_ids):
 		indexShift[i*len(node_ids)] = (s_id, [n_id for j, n_id in enumerate(node_ids)])
 		for k, n_id in enumerate(node_ids):
 			invCurrIndex[(s_id, n_id)] = i*len(node_ids) + k
+
 	# Now extract the LP representation from the safe formula
 	Amat = None
 	bmat = None
 	for piGTL, n_id in zip(gtlFormulas, nodes):
+		# Check if the formula are safe formula
 		assert isinstance(piGTL, AtomicGTL), " Not an atomic proposition"
 		assert len(lG.getLabelMatRepr(n_id)[0]) ==  piGTL.c.shape[0]
 		(coeffList, indexList) = lG.getLabelMatRepr(n_id)

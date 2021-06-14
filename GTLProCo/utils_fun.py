@@ -123,29 +123,14 @@ def create_random_graph_and_reach_avoid_spec(nbNode, maxEdgePerNode, minWidth=0.
 
 if __name__ == "__main__":
 
-	from .gtlproco import create_minlp_gurobi, create_gtl_proco, create_reach_avoid_problem_convex
-	# from .oldSDP import computeMforFixedV
+	from .gtlproco import create_minlp_gurobi, create_reach_avoid_problem_convex, gtlproco_scp
 
-	# For printing the Graph
-	# import networkx as nx
-	# from networkx.drawing.nx_pydot import write_dot
-	# import matplotlib.pyplot as plt
-
-	np.random.seed(401)
+	# np.random.seed(401)
 	nNode = 30
 	nEdge = np.random.randint(2, 3)
 	Kp = 10
 	lG, gtl, nodes, safeGTL, initPoint, desPoint = \
 		create_random_graph_and_reach_avoid_spec(nNode, nEdge, scrambling=True)
-
-	# G = nx.Graph()
-	# G.add_nodes_from(lG.V)
-	# G.add_edges_from(lG.E)
-	# pos = nx.nx_agraph.graphviz_layout(G)
-	# nx.draw(G, pos=pos)
-	# write_dot(G, 'file.dot')
-	# plt.show()
-	# exit()
 
 	# print_milp_repr(gtl, nodes, Kp, lG, initTime=0)
 	m_milp = create_milp_constraints(gtl, nodes, Kp, lG)
@@ -159,27 +144,11 @@ if __name__ == "__main__":
 		return costValue
 	cost_fun = None
 
-	# Use GTLproco Sewuential solver
-	optCost, status, solveTime, xDictRes, MdictRes, ljRes, swarm_ids, node_ids = \
-		create_gtl_proco(m_milp, lG, Kp, initPoint, initPoint, cost_fun=cost_fun, solve=True, 
-					maxIter=100, epsTol=1e-3, lamda=100, devM=1, rho0=1e-3, 
-					rho1=0.75, rho2=0.95, alpha=3.0, beta=3,
-					timeLimit=50, n_thread=0, verbose=True, autotune=False)
-	print(ljRes)
-	print(optCost, status, solveTime)
-	maxDiff = 0
-	# print('Desired Density : ', desPoint)
-	for s_id in swarm_ids:
-		for t in range(Kp):
-			for n_id in node_ids:
-				s = sum(MdictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
-				maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
-	print('Max diff = ', maxDiff)
-
 	# Use GUROBI Bilinear solver
 	optCost, status, solveTime, xDictRes, MdictRes, ljRes, swarm_ids, node_ids = \
 		create_minlp_gurobi(m_milp, lG, Kp, initPoint, initPoint, 
 			cost_fun=cost_fun, timeLimit=50, n_thread=0, verbose=True)
+	print('-------------------------------------------')
 	print(ljRes)
 	print(optCost, status, solveTime)
 	maxDiff = 0
@@ -190,6 +159,23 @@ if __name__ == "__main__":
 				s = sum(MdictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
 				maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
 	print('Max diff = ', maxDiff)
+	print('-------------------------------------------')
+
+	optCost, status, solveTime, xDictRes, MdictRes, ljRes, swarm_ids, node_ids = gtlproco_scp(m_milp, lG, Kp, 
+    	initPoint, initPoint, cost_fun=cost_fun, timeLimit=50, n_thread=0, verbose=True, verbose_solver=False,
+    		costTol=1e-6, bilTol=1e-6, maxIter=100, mu_lin=1e1, mu_period=1)
+	print('-------------------------------------------')
+	print(ljRes)
+	print(optCost, status, solveTime)
+	maxDiff = 0
+	# print('Desired Density : ', desPoint)
+	for s_id in swarm_ids:
+		for t in range(Kp):
+			for n_id in node_ids:
+				s = sum(MdictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
+				maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+	print('Max diff = ', maxDiff)
+	print('-------------------------------------------')
 
 	# Use the convex solver in case of scrambling pattern
 	def cost_fun(xDict, MDict, swarm_ids, node_ids):
@@ -203,6 +189,7 @@ if __name__ == "__main__":
 		create_reach_avoid_problem_convex(safeGTL.values(), safeGTL.keys(), desPoint, lG, 
 			cost_fun=None, cost_M = None, solve=True, timeLimit=50, n_thread=0, verbose=True,
 			sdp_solver=True)
+	print('-------------------------------------------')
 	print(optCost, status, solveTime)
 	print('Max diff = ', 0)
 
@@ -227,3 +214,4 @@ if __name__ == "__main__":
 		if np.linalg.norm(desPoint-currPos) < 1e-5:
 			print (t, currPos)
 			break
+	print('-------------------------------------------')
