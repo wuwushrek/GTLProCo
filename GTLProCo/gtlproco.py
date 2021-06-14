@@ -9,29 +9,32 @@ import time
 def create_linearize_constr(mOpt, xDen, MarkovM, dictSlack, dictConstr, swam_ids, Kp, node_ids):
 	""" Create a gurobi prototype of linearized nonconvex constraint
 		around the solution of the previous iteration.
-		Additionally, create the slack variables for the constraints.
+		Additionally, create the slack variables for the constraints
+		:param mOpt : the Gurobi instance problem to solve
+		:param xDen : the density distribution variable of the swarm of the gurobi problem
+		:param MarkovM : the Markov matrix variable of the gurobi problem
+		:param dictSlack : A dictionary to store the slack variables added to the linearized constraints
+		:param dictConstr : A dictionary to stire the parameterized and linearized constraints
+		:param swam_ids :A set containing the identifier for all the swarms
+		:param Kp : the loop time horizon
+		:param node_ids : A set containing the identifier of all the nodes of the graph
 	"""
-	# Add the slack variable 
+	# Create the slack variables to add to the linearized constraints
 	for s_id in swam_ids:
 		for t in range(Kp):
 			for n_id in node_ids:
 				dictSlack[(s_id, n_id, t)] = \
-					mOpt.addVar(lb=-gp.GRB.INFINITY, name='Z[{}][{}]({})'.format(s_id,n_id,t))
-
-	# Add the absolute value of slack variable
-	for s_id in swam_ids:
-		for t in range(Kp):
-			for n_id in node_ids:
+					mOpt.addVar(name='Z[{}][{}]({})'.format(s_id,n_id,t))
 				dictSlack[(s_id, -n_id-1, t)] = \
-					mOpt.addVar(lb=0, name='AZ[{}][{}]({})'.format(s_id,n_id,t))
+					mOpt.addVar(name='nZ[{}][{}]({})'.format(s_id,n_id,t))
 
-	# Create the linearized constraints
+	# Create and add thelinearized constraints
 	for s_id in swam_ids:
 		for t in range(Kp):
 			for n_id in node_ids:
 				dictConstr[(s_id, n_id, t)] = mOpt.addLConstr(
-					gp.LinExpr([1,-1]+ [0 for i in node_ids] + [0 for i in node_ids], 
-						[xDen[(s_id,n_id,t+1)], dictSlack[(s_id, n_id, t)]] + \
+					gp.LinExpr([1,1,-1]+ [1.0/len(node_ids) for i in node_ids] + [1.0/len(node_ids) for i in node_ids], 
+						[xDen[(s_id,n_id,t+1)], dictSlack[(s_id, n_id, t)], dictSlack[(s_id, -n_id-1, t)]] + \
 						[ xDen[(s_id,m_id,t)] for m_id in node_ids] + \
 						[ MarkovM[(s_id,n_id,m_id,t)] for m_id in node_ids]
 					), 
@@ -39,235 +42,202 @@ def create_linearize_constr(mOpt, xDen, MarkovM, dictSlack, dictConstr, swam_ids
 					0, 
 					name='Lin[{}][{}]({})'.format(s_id,n_id,t))
 
-	# Create the constraints by the absolute value of the slack variable
-	for s_id in swam_ids:
-		for t in range(Kp):
-			for n_id in node_ids:
-				mOpt.addConstr(dictSlack[(s_id, n_id,t)] <= dictSlack[(s_id, -n_id-1,t)])
-				mOpt.addConstr(dictSlack[(s_id, n_id,t)] >= -dictSlack[(s_id, -n_id-1,t)])
 
-def update_opt_step_k(mOpt, xDen, MarkovM, initRange, dictConstr, trustRegion, xk, Mk, swam_ids, Kp, node_ids):
+def create_l1_trust_region_constr(mOpt, xDen, swam_ids, Kp, node_ids):
+	""" Create a L1-norm trust region type of constraints
+		:param mopt :  the Gurobi instance problem to solve
+		:param xDen : the density distribution variable of the swarm of the gurobi problem
+		:param swam_ids :A set containing the identifier for all the swarms
+		:param Kp : the loop time horizon
+		:param node_ids : A set containing the identifier of all the nodes of the graph
 	"""
-		Update the optimization problem based on the optimal solution at the past iteration
-		given by xk and Mk
+	# Store the extra variable w_i^s(t) for all i in node_ids, s in swarm_ids and time t
+	extraVar = {(s_id,n_id,t) : mOpt.addVar(lb=0, name='t[{}][{}][{}]'.format(s_id,n_id,t)) for s_id in swam_ids for t in range(Kp+1) for n_id in node_ids}
+	# Store the constraints on the new variable |x_i^s(t) - xk_i^s(t)| <= w_i^s(t) for all t and swarm s, and index i
+	dictConstrVar = {(s_id,n_id,t) : (mOpt.addLConstr( gp.LinExpr([1,-1], [xDen[s_id,n_id,t],extraVar[(s_id,n_id,t)]]), gp.GRB.LESS_EQUAL, 0),\
+										mOpt.addLConstr( gp.LinExpr([-1,-1], [xDen[s_id,n_id,t],extraVar[(s_id,n_id,t)]]), gp.GRB.LESS_EQUAL, 0))\
+						for s_id in swam_ids for t in range(Kp+1) for n_id in node_ids 
+					}
+	# Store the constraint sum_i w_i^s(t) <= trust region for all swarm s and time t
+	dictConstrL1 = {(s_id, t) : mOpt.addLConstr(gp.LinExpr([1 for i in node_ids], [extraVar[(s_id,n_id,t)] for n_id in node_ids]), gp.GRB.LESS_EQUAL, 0) for s_id in swam_ids for t in range(Kp+1)}
+	return extraVar, dictConstrVar, dictConstrL1
+
+
+def find_initial_feasible_Markov(lG, Kp, xk, verbose=True):
+	""" Given  the time-varying density distribution xk, this function computes the time-varying Markov matrix
+		that satisfies as close as possible x(t+1) = M(t) x(t).
+		That is, find M(t) solution of the optimization problem minimize lambda such that xk(t+1) =  M(t) xk(t) + lambda
+		:param lG : The Labelled graph representation
+		:param Kp : the loop time horizon
+		:param xk : the current value of the density distribution
+		:param verbose : specify if verbose when solving the optimization problem
 	"""
-	# Set the constraint limits on M imposed by the trust region
-	for s_id in swam_ids:
+	# Create the Gurobi model
+	mOpt = gp.Model('Initial Markov matrix feasibility problem')
+	mOpt.Params.OutputFlag = verbose
+	mOpt.Params.NumericFocus = 3
+	# Swarm and graph configuration information
+	swarm_ids = lG.eSubswarm.keys()
+	node_ids = lG.V.copy()
+	# Create the different Markov matrices
+	MarkovM = dict()
+	for s_id in swarm_ids:
+		nedges = lG.getSubswarmNonEdgeSet(s_id)
 		for n_id in node_ids:
 			for m_id in node_ids:
 				for t in range(Kp):
-					MarkovM[(s_id, n_id, m_id, t)].lb = \
-						np.maximum(Mk[(s_id, n_id, m_id, t)]-trustRegion, initRange[(s_id, n_id, m_id, t)][0])
-					MarkovM[(s_id, n_id, m_id, t)].ub = \
-						np.minimum(Mk[(s_id, n_id, m_id, t)]+trustRegion, initRange[(s_id, n_id, m_id, t)][1])
+					# Motion constraints been enforced
+					if (m_id, n_id) in nedges:
+						MarkovM[(s_id, n_id, m_id, t)] = \
+							mOpt.addVar(lb=0, ub=0, name='M[{}][{}][{}][{}]'.format(s_id, n_id, m_id,t))
+					else:
+						MarkovM[(s_id, n_id, m_id, t)] = \
+							mOpt.addVar(lb=0, ub=1, name='M[{}][{}][{}][{}]'.format(s_id, n_id, m_id,t))
 
-	for (s_id, n_id, t), c in dictConstr.items():
-		c.RHS = -sum([Mk[(s_id, n_id, m_id, t)]*xk[(s_id, m_id, t)] for m_id in node_ids])
-		for m_id in node_ids:
-			mOpt.chgCoeff(c, MarkovM[(s_id, n_id, m_id, t)], -xk[(s_id, m_id, t)])
-			mOpt.chgCoeff(c, xDen[(s_id, m_id, t)], - Mk[(s_id, n_id, m_id, t)])
+	# Add the constraints on the stochasticity of the Markov matrices
+	for s_id in swarm_ids:
+		for n_id in node_ids:
+			for t in range(Kp):
+				mOpt.addConstr(gp.quicksum([MarkovM[(s_id, m_id, n_id, t)] for m_id in node_ids]) == 1)
 
-
-def compute_actual_penalized_cost(cost_fun, lam, xk, Mk, swam_ids, Kp, node_ids):
-	""" Compute the penalized cost function based on the constraint x(t+1) = M(t) x(t)
-		In the paper, this penalized cost is referred to as J
-	"""
-	costVal = get_cost_function(cost_fun, xk, Mk, swam_ids, Kp, node_ids)
-	penList = list()
-	for s_id in swam_ids:
+	# Additional constraints on the swarm density evolution due to Mk
+	slVar = dict()
+	for s_id in swarm_ids:
 		for t in range(Kp):
 			for n_id in node_ids:
-				penList.append(np.abs(xk[(s_id,n_id,t+1)] \
-								- sum([ Mk[(s_id,n_id,m_id,t)]* xk[(s_id, m_id, t)] \
-										for m_id in node_ids])))
-	return costVal + lam * sum(penList)
+				slVar[(s_id,n_id,t)] = mOpt.addVar(lb=0, name='slack[{}][{}][{}]'.format(s_id,n_id,t))
+				slVar[(s_id,-n_id-1,t)] = mOpt.addVar(lb=0, name='slack[{}][{}][{}]'.format(s_id,-n_id-1,t))
+				mOpt.addLConstr(
+					gp.LinExpr([1, -1]+ [xk[s_id,m_id,t] for m_id in node_ids],\
+						[slVar[(s_id,n_id,t)],slVar[(s_id,-n_id-1,t)]] + [MarkovM[(s_id,n_id,m_id,t)] for m_id in node_ids]
+					), 
+					gp.GRB.EQUAL, 
+					xk[s_id,n_id,t+1], 
+					name='Mkv[{}][{}]({})'.format(s_id,n_id,t))
 
+	# Set the objective function as the quantifier if the bilinear constraint
+	mOpt.setObjective(gp.quicksum([slackVar for _,slackVar in slVar.items()]), gp.GRB.MINIMIZE)
+	# Find the optimal solution of the problem
+	curr_time = time.time()
+	mOpt.optimize()
+	solve_time = time.time() - curr_time
+	# Collect the solution of the problem
+	dictM = {(s_id, n_id, m_id, t) : Mval.x for (s_id, n_id, m_id,t), Mval in MarkovM.items()}
+	return dictM, solve_time
 
-def sequential_optimization(mOpt, cost_fun, xDen, MarkovM, dictConstr, swam_ids, Kp, 
-			node_ids, maxIter=20, epsTol=1e-5, lamda=10, devM=0.5, rho0=1e-5, 
-			rho1=0.5, rho2=0.8, alpha=2.0, beta=1.5, 
-			timeLimit=5, n_thread=0, verbose=True, autotune=True):
-	""" Solve the sequential mixed integer linear program
-	:param maxIter : The maximum number of iteration of the algorithm
-	:param epsTol : The desired tolerance of the optimal solution
-	:param lamda : Penalty cost for violating the state evolution constraint
-	:param devM : Initial deviation between two consecutive iterates in control
-	:param rho0 : rho0 < rho1 <<1, Threshold to consider the aproximation too inaccurate -> shrink
-	:param rho1 : rho1 < rho2, Threshold to consider the approximation good (so accept current step) but need to shrink the trust region
-	:param rho2 : 0 << rho2 < 1, Threshold to consider the approx good and increment the trust region
-	:param alpha : alpha > 1, factor used to shrink the trust region
-	:param beta : beta > 1, factor used to inflate the trust region
+def find_initial_feasible_density(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, verbose=True):
+	""" Compute an initial feasible time-varying density distribution to the GTL Constraints.
+		:param milp_expr : A mixed integer representation of the GTL constraints
+		:param lG : The labelled graph
+		:param Kp : The loop time horizon
+		:param init_den_lb : The lower bound on the density distribution at time 0
+		:param init_den_ub : The upper bound on the density distribution at time 0
+		:param verbose : Specify if verbose when solving the optimization problem
 	"""
-	dictXk = dict()
-	dictMk = dict()
-	initRange = dict()
-	# Save the initial point that do not need to be feasible
-	for s_id in swam_ids:
-		for m_id in node_ids:
-			for t in range(Kp+1):
-				dictXk[(s_id, m_id, t)] = 0.5 *(xDen[(s_id, m_id, t)].lb + xDen[(s_id, m_id, t)].ub)
-				if t == Kp:
-					continue
-				countEnforced = 0
-				for n_id in node_ids:
-					countEnforced += MarkovM[(s_id, n_id,m_id,t)].lb
-					dictMk[(s_id, n_id,m_id,t)] = MarkovM[(s_id, n_id,m_id,t)].lb
-					# dictMk[(s_id, n_id,m_id,t)] = 0.5*(MarkovM[(s_id, n_id,m_id,t)].lb + MarkovM[(s_id, n_id,m_id,t)].ub)
-					initRange[((s_id, n_id,m_id,t))] = (MarkovM[(s_id, n_id,m_id,t)].lb, MarkovM[(s_id, n_id,m_id,t)].ub)
-				assert countEnforced < 1
-				residueV = 1 - countEnforced
-				for n_id in node_ids:
-					if dictMk[(s_id, n_id,m_id,t)] + residueV >= MarkovM[(s_id, n_id,m_id,t)].lb and \
-						dictMk[(s_id, n_id,m_id,t)] + residueV <= MarkovM[(s_id, n_id,m_id,t)].ub:
-						dictMk[(s_id, n_id,m_id,t)] = dictMk[(s_id, n_id,m_id,t)]  + residueV
-						break
-
-	# INitialize the trust region
-	rk = devM
-	Jk = None
-	solve_time = 0
-	status = -1
-	# Set the limit on the time limit
+	# Create the Gurobi model
+	mOpt = gp.Model('Initial feasible density')
 	mOpt.Params.OutputFlag = verbose
+	mOpt.Params.Presolve = 2
+	mOpt.Params.NumericFocus = 3
+	# mOpt.Params.MIPFocus = 2
+	# mOpt.Params.Heuristics = 0.01 # Less time to find feasible solution --> the problem is always feasible
+	# mOpt.Params.Crossover = 0
+	# mOpt.Params.CrossoverBasis = 0
+	# # mOpt.Params.BarHomogeneous = 0
+	# mOpt.Params.FeasibilityTol = 1e-6
+	# mOpt.Params.OptimalityTol = 1e-6
+	# mOpt.Params.MIPGap = 1e-3
+	# mOpt.Params.MIPGapAbs = 1e-6
+
+	# Obtain the milp encoding
+	(newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS) = milp_expr
+
+	# Get the boolean and continuous variables from the MILP expressions of the GTL
+	bVars, rVars, lVars, denVars = getVars(newVars, lVars)
+
+	# Swarm and graph configuration information
+	swarm_ids = lG.eSubswarm.keys()
+	node_ids = lG.V.copy()
+
+	# Create the different density variables
+	xDen = dict()
+	for s_id in swarm_ids:
+		for n_id in node_ids:
+			for t in range(Kp+1):
+				# Initial distribution range being enforced
+				if t == 0 and init_den_lb is not None and init_den_ub is not None:
+					xDen[(s_id, n_id, t)] = mOpt.addVar(lb=init_den_lb[s_id][n_id], ub=init_den_ub[s_id][n_id], 
+															name='x[{}][{}]({})'.format(s_id, n_id, t))
+				else:
+					xDen[(s_id, n_id, t)] = mOpt.addVar(lb=0, ub=1, 
+															name='x[{}][{}]({})'.format(s_id, n_id, t))
+	# Create the boolean variables from the GTL formula -> add them to the xDen dictionary
+	for ind in bVars:
+		xDen[ind] = mOpt.addVar(vtype=gp.GRB.BINARY, name='b[{}]'.format(ind[0]))
+
+	# Create the tempory real variables from the GTL formula -> add them to the xDen dictionary
+	for ind in rVars:
+		xDen[ind] = mOpt.addVar(lb=0, ub=1.0, name='r[{}]'.format(ind[0]))
+
+	# Create the binary variables from the loop constraint
+	for ind in lVars:
+		xDen[ind] = mOpt.addVar(vtype=gp.GRB.BINARY, name='l[{}]'.format(ind[0]))
+
+	# Trivial constraints from the Markov matrix x(t+1) <= A^t x(t) and x(t) <= A^t x(t+1)
+	for s_id in swarm_ids:
+		nedges = lG.getSubswarmNonEdgeSet(s_id)
+		for t in range(Kp):
+			for n_id in node_ids:
+				mOpt.addConstr(xDen[(s_id, n_id, t+1)] <= gp.quicksum([ 0 if (m_id, n_id) in nedges else xDen[(s_id,m_id,t)] for m_id in node_ids]))
+				mOpt.addConstr(xDen[(s_id, n_id, t)] <= gp.quicksum([ 0 if (n_id, m_id) in nedges else xDen[(s_id,m_id,t+1)] for m_id in node_ids]))
+
+	# Add the constraint on the density distribution
+	listContr = create_den_constr(xDen,swarm_ids, Kp, node_ids)
+
+	# Add the MILP constraint on the density distribution
+	listContr.extend(create_gtl_constr(xDen, milp_expr))
+	mOpt.addConstrs((c for c in listContr))
+
+	# Set the cost function
+	mOpt.setObjective(gp.quicksum( [(ind[0]+1)*xDen[ind] for ind in lVars] ), gp.GRB.MINIMIZE)
+	curr_time = time.time()
+	mOpt.optimize()
+	solve_time = time.time() - curr_time
+	# mOpt.display()
+	resxk = {kVal : xVal.x for kVal, xVal in xDen.items()}
+	return resxk, solve_time
+
+def create_linearized_problem_scp(milp_expr, lG, Kp, cost_fun, init_den_lb=None, init_den_ub=None,
+									timeLimit=5, n_thread=0, verbose=True, mu_lin=10, mu_period=1):
+	""" Create the linearized problem to solve at each iteration of the sequential convex programming scheme
+		:param milp_expr :  A mixed integer representation of the GTL constraints
+		:param lG : The labelled graph
+		:param Kp : The loop time horizon 
+		:param cost_fun : The cost function to optimize as a fujnction of the Markov martix and the density distribution
+		:param init_den_lb : The lower bound on the density distribution at time 0
+		:param init_den_ub : The upper bound on the density distribution at time 0
+		:param timeLimit : The time limit at each time step f the solver
+		:param n_thread : The maximum number of thread to use
+		:param verbose : Specify if verbose when solving the optimization problem
+		:param mu_lin : A penalization term for the linearized constraints
+		:param mu_period : A penalization term for looping early than Kp
+	"""
+	# Create the Gurobi model
+	mOpt = gp.Model('Linearized problem at each iteration')
+	mOpt.Params.OutputFlag = verbose
+	mOpt.Params.Presolve = 2
+	mOpt.Params.NumericFocus = 3
+	# mOpt.Params.MIPFocus = 1
+	# mOpt.Params.Crossover = 0
+	# mOpt.Params.CrossoverBasis = 0
+	# # mOpt.Params.BarHomogeneous = 0
+	# mOpt.Params.FeasibilityTol = 1e-6
+	# mOpt.Params.OptimalityTol = 1e-6
+	# # mOpt.Params.MIPGap = 1e-3
+	# # mOpt.Params.MIPGapAbs = 1e-6
 	mOpt.Params.Threads = n_thread
 	mOpt.Params.TimeLimit = timeLimit
-	for iterV in range(maxIter):
-		# Check if teh time limit is elapsed
-		if solve_time >= timeLimit:
-			status = -1
-			break
-		# Update the optimization problem and solve it
-		update_opt_step_k(mOpt, xDen, MarkovM, initRange, dictConstr, rk, dictXk, dictMk, swam_ids, Kp, node_ids)
-		if iterV == 0 and autotune:
-			mOpt.update()
-			mOpt.tune()
-		cur_t = time.time()
-		mOpt.optimize()
-		solve_time += time.time() - cur_t
-		if mOpt.status == gp.GRB.OPTIMAL:
-			status = 1
-		elif mOpt.status == gp.GRB.TIME_LIMIT:
-			status = -1
-			break
-		else:
-			status = 0
-			break
-		dictXk1 = dict()
-		dictMk1 = dict()
-		for s_id in swam_ids:
-			for n_id in node_ids:
-				for t in range(Kp+1):
-					dictXk1[(s_id, n_id, t)] = xDen[(s_id,n_id,t)].x
-					if t == Kp:
-						continue
-					for m_id in node_ids:
-						dictMk1[(s_id, n_id,m_id,t)] = MarkovM[(s_id,n_id,m_id,t)].x
-		# Get the optimal cost
-		Lk1 = mOpt.objVal
-		if Jk is None:
-			Jk = compute_actual_penalized_cost(cost_fun, lamda, dictXk, dictMk, swam_ids, Kp, node_ids)
-		# Jk, _ = compute_actual_penalized_cost(cost_fun, lamda, dictXk, dictMk, swam_ids, Kp, node_ids)
-		Jk1 = compute_actual_penalized_cost(cost_fun, lamda, dictXk1, dictMk1, swam_ids, Kp, node_ids)
-		deltaJk = Jk - Jk1
-		deltaLk = Jk - Lk1
 
-		# If the solution is good enough
-		if np.abs(deltaJk) < epsTol:
-			dictXk = dictXk1
-			dictMk = dictMk1
-			break
-
-
-		# If the approximation is too loose - contract the trust region and restart the otpimization
-		rhok = deltaJk / deltaLk
-		if verbose:
-			print('Iteration : {}, Rhok : {}, rk : {}'.format(iterV, rhok, rk))
-			print('Lk : {}, Lk+1 : {}'.format(Jk, Lk1))
-			print('Jk : {}, Jk+1 : {}'.format(Jk, Jk1))
-			print('deltaJk : ', deltaJk)
-			print('deltaLk : ', deltaLk)
-			# print('Jk+1 : ', Jk1)
-		if rhok>0 and rhok < rho0:
-			rk = rk / alpha
-			continue
-
-		# Accept this step
-		# dictXk = trueXk
-		dictXk = dictXk1
-		dictMk = dictMk1
-		Jk = Jk1
-
-		# UPdate the trust region if needed
-		rk = rk / alpha if rhok < rho1 else (beta*rk if rho2 < rhok else rk)
-		rk = np.minimum(rk, 1) # rk should be less than 1 due to the Markov matrix values
-		if rk < 1e-6:
-			print(' Algorithm stopped : {}<1e-6, trust region too small'.format(rk))
-			break
-	# return dictXk, dictMk1
-	return status, solve_time
-
-
-def create_den_constr(xDen, swam_ids, Kp, node_ids):
-	""" Given symbolic variables (gurobi, pyomo, etc..) representing the densities
-		distribution at all times and all nodes, this function returns the 
-		constraint 1^T x^s(t) = 1 for all s and t
-	"""
-	listConstr = list()
-	for s_id in swam_ids:
-		for t in range(Kp+1):
-			listConstr.append(sum([ xDen[(s_id, n_id, t)] for n_id in node_ids]) == 1)
-	return listConstr
-
-def create_markov_constr(MarkovM, swam_ids, Kp, node_ids):
-	""" Given symbolic variables (gurobi, pyomo, etc..) representing the Markov matrices
-		at all times, this function returns the constraint 1^T M^s(t) = 1 for all s and t
-		and M_ij^s(t) == 0 for (j,i) not in the edge list
-	"""
-	listConstr = list()
-	# Stochastic natrix constraint
-	for s_id in swam_ids:
-		for t in range(Kp):
-			for n_id in node_ids:
-				listConstr.append(sum([MarkovM[(s_id,m_id,n_id,t)] for m_id in node_ids]) == 1)
-	# Adjacency natrix constraints
-	# for s_id, edges in edgeSwarm.items():
-	# 	for t in range(Kp):
-	# 		for (n_id, m_id) in edges:
-	# 			listConstr.append(MarkovM[(s_id, m_id, n_id, t)] == 0)
-
-	return listConstr
-
-def create_bilinear_constr(xDen, MarkovM, swam_ids, Kp, node_ids):
-	""" Return the bilinear constraint M(t) x(t) = x(t+1)
-	"""
-	listConstr = list()
-	for s_id in swam_ids:
-		for t in range(Kp):
-			for n_id in node_ids:
-				listConstr.append(sum([ MarkovM[(s_id,n_id,m_id,t)]* xDen[(s_id, m_id, t)] for m_id in node_ids])\
-									== xDen[(s_id, n_id, t+1)])
-	return listConstr
-
-
-def get_cost_function(cost_fun, xDen, MarkovM, swam_ids, Kp, node_ids):
-	""" Return the cost function over the graph trajectory length
-	"""
-	costVal = 0
-	if cost_fun is not None:
-		for t in range(Kp):
-			xDict = dict()
-			MDict = dict()
-			for s_id in swam_ids:
-				for n_id in node_ids:
-					xDict[(s_id, n_id)] = xDen[(s_id, n_id, t)]
-					for m_id in node_ids:
-						MDict[(s_id, n_id, m_id)] = MarkovM[(s_id, n_id, m_id, t)]
-			costVal += cost_fun(xDict, MDict, swam_ids, node_ids)
-	return costVal
-
-
-def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
-							cost_fun=None, addBilinear=True, solve=False):
 	# Obtain the milp encoding
 	(newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS) = milp_expr
 
@@ -284,12 +254,368 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 		for n_id in node_ids:
 			for t in range(Kp+1):
 				if t == 0 and init_den_lb is not None and init_den_ub is not None:
+					xDen[(s_id, n_id, t)] = mOpt.addVar(lb=init_den_lb[s_id][n_id], ub=init_den_ub[s_id][n_id], 
+															name='x[{}][{}]({})'.format(s_id, n_id, t))
+				else:
+					xDen[(s_id, n_id, t)] = mOpt.addVar(lb=0, ub=1, 
+															name='x[{}][{}]({})'.format(s_id, n_id, t))
+	# Create the boolean variables from the GTL formula -> add them to the xDen dictionary
+	for ind in bVars:
+		xDen[ind] = mOpt.addVar(vtype=gp.GRB.BINARY, name='b[{}]'.format(ind[0]))
+
+	# Create the tempory real variables from the GTL formula -> add them to the xDen dictionary
+	for ind in rVars:
+		xDen[ind] = mOpt.addVar(lb=0, ub=1.0, name='r[{}]'.format(ind[0]))
+
+	# Create the binary variables from the loop constraint
+	for ind in lVars:
+		xDen[ind] = mOpt.addVar(vtype=gp.GRB.BINARY, name='l[{}]'.format(ind[0]))
+
+	# Create the time-varying Markov matrices
+	MarkovM = dict()
+	for s_id in swarm_ids:
+		nedges = lG.getSubswarmNonEdgeSet(s_id)
+		for n_id in node_ids:
+			for m_id in node_ids:
+				for t in range(Kp):
+					# Motion constraints been enforced
+					if (m_id, n_id) in nedges:
+						MarkovM[(s_id, n_id, m_id, t)] = \
+							mOpt.addVar(lb=0, ub=0, name='M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t))
+					else:
+						MarkovM[(s_id, n_id, m_id, t)] = \
+							mOpt.addVar(lb=0, ub=1, name='M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t))
+
+	# Trivial constraints from the Markov matrix x(t+1) <= A^t x(t) and x(t) <= A^t x(t+1)
+	for s_id in swarm_ids:
+		nedges = lG.getSubswarmNonEdgeSet(s_id)
+		for t in range(Kp):
+			for n_id in node_ids:
+				mOpt.addConstr(xDen[(s_id, n_id, t+1)] <= gp.quicksum([ 0 if (m_id, n_id) in nedges else xDen[(s_id,m_id,t)] for m_id in node_ids]))
+				mOpt.addConstr(xDen[(s_id, n_id, t)] <= gp.quicksum([ 0 if (n_id, m_id) in nedges else xDen[(s_id,m_id,t+1)] for m_id in node_ids]))
+
+
+	# Create the linearized constraints
+	dictSlack = dict()
+	dictConstr =  dict()
+	create_linearize_constr(mOpt, xDen, MarkovM, dictSlack, dictConstr, swarm_ids, Kp, node_ids)
+	listContr = []
+
+	# Add the constraint on the density distribution
+	listContr.extend(create_den_constr(xDen, swarm_ids, Kp, node_ids))
+
+	# Add the constraints on the Markov matrices
+	listContr.extend(create_markov_constr(MarkovM, swarm_ids, Kp, node_ids))
+
+	# Add the mixed-integer constraints
+	listContr.extend(create_gtl_constr(xDen, milp_expr))
+
+	# Create trust region constraints
+	extraVar, dictConstrVar, dictConstrL1 = create_l1_trust_region_constr(mOpt, xDen, swarm_ids, Kp, node_ids)
+
+	# Add all the constraints
+	mOpt.addConstrs((c for c in listContr))
+
+	costVal = get_cost_function(cost_fun, xDen, MarkovM, swarm_ids, Kp, node_ids)
+
+	# set_cost(cVal, xDen, mD, nids, sids)
+	mOpt.setObjective(gp.quicksum([*[mu_lin*sVar for _, sVar in dictSlack.items()], costVal, *[mu_period*(ind[0]+1)*xDen[ind] for ind in lVars]]), gp.GRB.MINIMIZE)
+
+	mOpt.update()
+
+	return mOpt, xDen, MarkovM, lVars, dictConstr, dictConstrVar, dictConstrL1
+
+def update_linearized_problem_scp(mOpt, xDen, MarkovM, dictConstr, trustRegion, dictConstrVar, dictConstrL1, xk, Mk, node_ids):
+	""" Given the linearized bilinear constraints, update such a constraint with respect to the previous solution xk and Mk.
+		:param mOpt : The gurobi instance of the linearized problem
+		:param xDen : The density distribution envolution of the problem instance
+		:param MarkovM : The Markov matrix of the problem instance
+		:param dictConstr : A dictionary to stire the parameterized and linearized constraints
+		:param trustRegion : The trust region value
+		:param dictConstrVar : # Store the constraints on the new variable |x_i^s(t) - xk_i^s(t)| <= w_i^s(t) for all t and swarm s, and index i
+		:param dictConstrL1 : Store the L1-norm constraint sum_i w_i^s(t) <= trust region for all swarm s and time t
+		:param xk : Solution of the linearized problem at the last iteration
+		:param Mk : Solution of the linearized problem at the last iteration
+		:param node_ids : The se of node identifers
+	"""
+	# First set the trust region constraints
+	for (s_id,n_id,t), (cV_r, cV_l) in  dictConstrVar.items():
+		cV_r.RHS = xk[(s_id,n_id,t)]
+		cV_l.RHS = -xk[(s_id,n_id,t)]
+
+	# Set the trust region on the L1 norm
+	for (s_id, t), cV in dictConstrL1.items():
+		cV.RHS = trustRegion
+
+	# Set the coefficients of the linearized constraints
+	for (s_id, n_id, t), c in dictConstr.items():
+		c.RHS = -sum([Mk[(s_id, n_id, m_id, t)]*xk[(s_id, m_id, t)] for m_id in node_ids])
+		for m_id in node_ids:
+			mOpt.chgCoeff(c, MarkovM[(s_id, n_id, m_id, t)], -xk[(s_id, m_id, t)])
+			mOpt.chgCoeff(c, xDen[(s_id, m_id, t)], - Mk[(s_id, n_id, m_id, t)])
+
+def compute_true_linearized_fun(xk, Mk, xk1, Mk1, swam_ids, Kp, node_ids):
+	""" Compute some metrics value used for the contratcion or expansion of trust region
+		:param xk : past density solution iterate
+		:param Mk : past Markov solution iterate
+		:param xk1 : current density solution iterate
+		:param Mk1 : current Markov solution iterate
+		:param swam_ids : the set of swarm identifier
+		:param Kp : the loop time horizon
+		:param node_ids : the set of node identifiers
+	"""
+	# Compute the linearization cost attained by Xk1 and Mk1
+	fklist = np.array([sum( [xk[(s_id,m_id,t)]*Mk1[(s_id,n_id,m_id,t)]+Mk[(s_id,n_id,m_id,t)]*(xk1[(s_id,m_id,t)]-xk[(s_id,m_id,t)]) for m_id in node_ids])\
+							 for s_id in swam_ids for t in range(Kp) for n_id in node_ids])
+	# Compute the actual relaized cost attained by Xk1 and Mk1
+	flist = np.array([sum([xk1[(s_id,m_id,t)]*Mk1[(s_id,n_id,m_id,t)] for m_id in node_ids]) \
+						for s_id in swam_ids for t in range(Kp) for n_id in node_ids])
+	# Collect Xk1 and Xk as an array
+	x1nextlist = np.array([xk1[(s_id,n_id,t+1)] for s_id in swam_ids for t in range(Kp) for n_id in node_ids])
+	xnextlist = np.array([xk[(s_id,n_id,t+1)] for s_id in swam_ids for t in range(Kp) for n_id in node_ids])
+	# Compute the actual realized cost by xk and Mk
+	prodxlist = np.array([sum([xk[(s_id,m_id,t)]*Mk[(s_id,n_id,m_id,t)] for m_id in node_ids]) \
+						for s_id in swam_ids for t in range(Kp) for n_id in node_ids])
+	return flist, fklist, np.linalg.norm(x1nextlist-flist,1), np.linalg.norm(xnextlist-prodxlist,1) 
+
+def gtlproco_scp(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
+					cost_fun=None, maxIter=10, costTol=1e-6, bilTol=1e-7,
+					mu_lin=1e1, mu_period=1, trust_lim= 1e-4, 
+					timeLimit=5, n_thread=0, verbose=True, verbose_solver=True):
+	""" Solve the probabilistic swarm control problem under GTL specifications
+		:param milp_expr : A mixed integer representation of the GTL constraints
+		:param lG : The labelled graph
+		:param Kp : The loop time horizon
+		:param init_den_lb : The lower bound on the density distribution at time 0
+		:param init_den_ub : The upper bound on the density distribution at time 0
+		:param cost_fun : The cost function to minimize
+		:param maxIter : The maximum number of iteration of the SCP scheme
+		:param costTol : The tolerance to decide the cost is optimal (variation between two iterations) 
+		:param bilTol : Accuracy tolerance for the bilinear constraint
+		:param mu_lin : A penalization term for the linearized constraints
+		:param mu_period : A penalization term for looping early than Kp
+		:param trust_lim : The trust region limit as lower bound under stopping the sequential scheme
+		:param timeLimit : The time limit at each time step f the solver
+		:param n_thread : The maximum number of thread to use
+		:param verbose : Specify if verbose when solving the optimization problem
+		:param verbose_solver : Specify if gurobi verbose
+	"""
+	
+	# Get the node ids and swarm ids
+	swarm_ids = lG.eSubswarm.keys()
+	node_ids = lG.V.copy()
+
+	# Initialize the SCP with a feasible solution to the GTL constraints
+	dictXk, sTime1 = find_initial_feasible_density(milp_expr, lG, Kp, init_den_lb=init_den_lb, init_den_ub=init_den_ub, verbose=verbose_solver)
+
+	# Initialize the SCP with the closes Markov Matrix
+	dictMk, sTime2 = find_initial_feasible_Markov(lG, Kp, dictXk, verbose=verbose_solver)
+
+	# Construct the linearized problem
+	linProb, xLin, Mlin, lVars, linConstr, dictConstrVar, dictConstrL1 = \
+		create_linearized_problem_scp(milp_expr, lG, Kp, cost_fun, init_den_lb=init_den_lb, init_den_ub=init_den_ub,
+						timeLimit=timeLimit, n_thread=n_thread, verbose=verbose_solver, mu_lin=mu_lin, mu_period=mu_period)
+
+	# Initialize the periodicy coefficient
+	ljRes = {ind0 : dictXk[ind0] for ind0 in lVars}
+
+	# Set the maximum trust region and intial trust region
+	trust_max = 2.0
+	trust_init = 1.0 # len(node_ids)
+
+	# Initialize the trust region
+	rk = trust_init
+
+	# Solving parameters and status
+	solve_time = sTime1 + sTime2
+	status = -1
+	optCost = 0
+
+	for i in range(maxIter):
+
+		# Check if the time limit is elapsed
+		if solve_time >= timeLimit:
+			status = -1
+			break
+
+		# Update the optimization problem and solve it
+		update_linearized_problem_scp(linProb, xLin, Mlin, linConstr, rk, dictConstrVar, dictConstrL1, dictXk, dictMk, node_ids)
+
+		# Measure optimization time
+		cur_t = time.time()
+		linProb.optimize()
+		solve_time += time.time() - cur_t
+
+		# Save the status of the problem
+		if linProb.status == gp.GRB.OPTIMAL:
+			status = 1
+		elif linProb.status == gp.GRB.TIME_LIMIT:
+			status = -1
+			break
+		else:
+			status = 0
+
+		# Collect the solution of the current iteration
+		dictMk1 = {kVal : Mval.x for kVal, Mval in Mlin.items()}
+		dictXk1 = {kVal : xVal.x for kVal, xVal in xLin.items()}
+
+		# Compute the linearized and realized cost
+		truef, linf, x1diffbil, xdiffbil = compute_true_linearized_fun(dictXk, dictMk, dictXk1, dictMk1, swarm_ids, Kp, node_ids)
+
+		# Check if the bilinear constraints are satisified
+		finish_bil = x1diffbil <= bilTol*len(node_ids)*Kp*len(swarm_ids) or xdiffbil <= bilTol*len(node_ids)*Kp*len(swarm_ids)
+
+		diffLin = np.linalg.norm(truef-linf, 1)
+		noImprov = (i > 0) and (np.abs(linProb.objVal-attainedCost) < costTol) and finish_bil
+		actualCost  = get_cost_function(cost_fun, dictXk1, dictMk1, swarm_ids, Kp, node_ids)
+		attainedCost = linProb.objVal
+
+		# The trust region expander and contractor coefficient are dependent on the accuracy of the bilinear constraint
+		rho_bil_k  =  1 if (xdiffbil == 0 and x1diffbil ==0) else (np.inf if xdiffbil == 0 else x1diffbil / xdiffbil)
+
+		# Check if the accuracy of the bilinear constraint of the new solution is better than the past solution
+		if rho_bil_k > 1: # If the obtained accuracy is worst the reject the step
+			rk  =  rk / (1e-1+rho_bil_k) if rho_bil_k < np.inf else 0
+			if verbose:
+				print('[Iteration {}] : Reject current solution -> Coarse Linearization'.format(i))
+		else: # If the accuracy has improved accept the step and change the trust region
+			dictXk = dictXk1
+			dictMk = dictMk1
+			optCost = actualCost
+			ljRes = {ind0 : xLin[ind0].x for ind0 in lVars}
+			rk = np.minimum(rk / (1e-3+rho_bil_k) if rho_bil_k < np.inf else 0, trust_max)
+			if verbose:
+				print('[Iteration {}] : Accept current solution'.format(i))
+
+		# Some printing
+		if verbose:
+			print('[Iteration {}] : Rho bil = {}, bil diff xk = {}, bil diff xk1 = {}'.format(i, rho_bil_k, xdiffbil, x1diffbil))
+			print('[Iteration {}] : Trust region = {}, actual Cost = {}, attained Cost = {}, Lin Error = {}, Solve Time = {}'.format(
+					i, rk, actualCost, attainedCost, diffLin, solve_time))
+
+		# If the trust region value is below the threshold
+		if rk < trust_lim:
+			if verbose:
+				print('[Iteration {}] : Minimum trust region reached'.format(i))
+			break
+
+		# If the solution does not improve
+		if noImprov:
+			if verbose:
+				print('[Iteration {}] : No improvement in the solution'.format(i))
+			break
+			
+	return optCost, status, solve_time, dictXk, dictMk, ljRes, swarm_ids, node_ids
+
+
+def create_den_constr(xDen, swam_ids, Kp, node_ids):
+	""" Given symbolic variables (gurobi, pyomo, etc..) representing the densities
+		distribution at all times and all nodes, this function returns the 
+		constraint 1^T x^s(t) = 1 for all s and t
+		:param xDen : The symbolic variable representing the density distribution of the swarm
+		:param swam_ids : The set of swarm identifiers
+		:param Kp : The loop time horizon
+		:param node_ids : The set of node identifiers
+	"""
+	listConstr = list()
+	for s_id in swam_ids:
+		for t in range(Kp+1):
+			listConstr.append(sum([ xDen[(s_id, n_id, t)] for n_id in node_ids]) == 1)
+	return listConstr
+
+def create_markov_constr(MarkovM, swam_ids, Kp, node_ids):
+	""" Given symbolic variables (gurobi, pyomo, etc..) representing the Markov matrices
+		at all times, this function returns the stochasticity constraint 1^T M^s(t) = 1 for all s and t
+		:param MarkovM : Symbolic variable representing the density distribution of the swarm
+		:param swam_ids : The set of swarm identifiers
+		:param Kp : The loop time horizon
+		:param node_ids : The set of node identifiers
+	"""
+	listConstr = list()
+	# Stochastic natrix constraint
+	for s_id in swam_ids:
+		for t in range(Kp):
+			for n_id in node_ids:
+				listConstr.append(sum([MarkovM[(s_id,m_id,n_id,t)] for m_id in node_ids]) == 1)
+	return listConstr
+
+def create_bilinear_constr(xDen, MarkovM, swam_ids, Kp, node_ids):
+	""" Return the bilinear constraint M(t) x(t) = x(t+1)
+		:param xDen :  The symbolic variable representing the density distribution of the swarm
+		:param MarkovM : Symbolic variable representing the density distribution of the swarm
+		:param swam_ids : The set of swarm identifiers
+		:param Kp : The loop time horizon
+		:param node_ids : The set of node identifiers
+	"""
+	listConstr = list()
+	for s_id in swam_ids:
+		for t in range(Kp):
+			for n_id in node_ids:
+				listConstr.append(sum([ MarkovM[(s_id,n_id,m_id,t)]* xDen[(s_id, m_id, t)] for m_id in node_ids])\
+									== xDen[(s_id, n_id, t+1)])
+	return listConstr
+
+
+def get_cost_function(cost_fun, xDen, MarkovM, swam_ids, Kp, node_ids):
+	""" Compute the cost function given the density evolution and Markvo matrix evolution
+		:param cost_fun : A python function taking as input xDict (emtire swarm density at a fixed time), 
+							MDict (Markov matrices at a fixed time), swam_ids, node_ids
+		:param xDen :  The symbolic variable representing the density distribution of the swarm
+		:param MarkovM : Symbolic variable representing the density distribution of the swarm
+		:param swam_ids : The set of swarm identifiers
+		:param Kp : The loop time horizon
+		:param node_ids : The set of node identifiers
+	"""
+	costVal = 0
+	if cost_fun is not None:
+		for t in range(Kp):
+			xDict = dict()
+			MDict = dict()
+			for s_id in swam_ids:
+				for n_id in node_ids:
+					xDict[(s_id, n_id)] = xDen[(s_id, n_id, t)]
+					for m_id in node_ids:
+						MDict[(s_id, n_id, m_id)] = MarkovM[(s_id, n_id, m_id, t)]
+			costVal += cost_fun(xDict, MDict, swam_ids, node_ids)
+	return costVal
+
+
+def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
+							cost_fun=None, solve=False):
+	""" Generic function to create and solve the bilinear optimization problem.
+		This function can be used to solve the MINLP using Gurobi, SCIP, Pyomo, Bonmin etc...
+		:param util_funs : Solver specific function to create continuous/binary variables, create constraints,
+							solve the optimization problem, etc...
+		:param milp_expr : A mixed integer representation of the GTL constraints
+		:param lG : The labelled graph
+		:param Kp : The loop time horizon
+		:param init_den_lb : The lower bound on the density distribution at time 0
+		:param init_den_ub : The upper bound on the density distribution at time 0
+		:param cost_fun : The cost function to minimize
+		:param solve : Specify if the problem must be solved or not
+	"""
+	# Obtain the milp encoding
+	(newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS) = milp_expr
+
+	# Get the boolean and continuous variables from the MILP expressions of the GTL
+	bVars, rVars, lVars, denVars = getVars(newVars, lVars)
+
+	# Swarm and graph configuration information
+	swarm_ids = lG.eSubswarm.keys()
+	node_ids = lG.V.copy()
+
+	# Create the different density variables
+	xDen = dict()
+	for s_id in swarm_ids:
+		for n_id in node_ids:
+			for t in range(Kp+1):
+				# Enforce the initial swarm distribution
+				if t == 0 and init_den_lb is not None and init_den_ub is not None:
 					xDen[(s_id, n_id, t)] = util_funs['r']('x[{}][{}]({})'.format(s_id, n_id, t),
 												init_den_lb[s_id][n_id], init_den_ub[s_id][n_id])
 				else:
 					xDen[(s_id, n_id, t)] = util_funs['r']('x[{}][{}]({})'.format(s_id, n_id, t))
-	# mOpt.addVar(lb=0, ub=1, name='x[{}][{}]({})'.format(s_id, n_id, t))
-	
+
 	# Create the different Markov matrices
 	MarkovM = dict()
 	for s_id in swarm_ids:
@@ -297,28 +623,25 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 		for n_id in node_ids:
 			for m_id in node_ids:
 				for t in range(Kp):
+					# Enforce the motion constraints by the adjacency matrix
 					if (m_id, n_id) in nedges:
 						MarkovM[(s_id, n_id, m_id, t)] = \
 							util_funs['r']('M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t),0,0)
 					else:
 						MarkovM[(s_id, n_id, m_id, t)] = \
 							util_funs['r']('M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t))
-	# mOpt.addVar(lb=0, ub=1, name='M[{}][{}][{}]({})'.format(s_id, n_id, m_id, t))
 	
 	# Create the boolean variables from the GTL formula -> add them to the xDen dictionary
 	for ind in bVars:
 		xDen[ind] = util_funs['b']('b[{}]'.format(ind[0]))
-		# mOpt.addVar(vtype=gp.GRB.BINARY, name='b[{}]({})'.format(ind0, tInd))
 
 	# Create the tempory real variables from the GTL formula -> add them to the xDen dictionary
 	for ind in rVars:
 		xDen[ind] = util_funs['r']('r[{}]'.format(ind[0]))
-		# mOpt.addVar(lb=0, ub=1.0, name='r[{}]({})'.format(ind0, tInd))
 
 	# Create the binary variables from the loop constraint
 	for ind in lVars:
 		xDen[ind] = util_funs['b']('l[{}]'.format(ind[0]))
-		# mOpt.addVar(vtype=gp.GRB.BINARY, name='l[{}]'.format(ind0))
 
 	# Add the constraint on the density distribution
 	listContr = create_den_constr(xDen,swarm_ids, Kp, node_ids)
@@ -327,18 +650,19 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 	listContr.extend(create_markov_constr(MarkovM, swarm_ids, Kp, node_ids))
 
 	# Add the bilinear constraints
-	if addBilinear:
-		listContr.extend(create_bilinear_constr(xDen, MarkovM, swarm_ids, Kp, node_ids))
+	listContr.extend(create_bilinear_constr(xDen, MarkovM, swarm_ids, Kp, node_ids))
 
-	# Add the mixed-integer constraints
+	# Add the mixed-integer constraints from the GTL specifications
 	listContr.extend(create_gtl_constr(xDen, milp_expr))
 
-	# Add all the constraints
+	# Add all the constraints yo the problem
 	for constr in listContr:
 		util_funs['constr'](constr)
 
+	# Compute the cost function if given by the user
 	costVal = get_cost_function(cost_fun, xDen, MarkovM, swarm_ids, Kp, node_ids)
-	# set_cost(cVal, xDen, mD, nids, sids)
+
+	# Set the cost function in the optimization problem
 	util_funs['cost'](costVal, xDen, MarkovM, swarm_ids, node_ids)
 
 	# Solve the problem
@@ -346,7 +670,7 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 	if solve:
 		optCost, status, solveTime = util_funs['solve']()
 
-	# Get the solution of the problem
+	# Collect the solution of the problem
 	xDictRes = dict()
 	MDictRes = dict()
 	ljRes = dict()
@@ -356,7 +680,6 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 				for t in range(Kp+1):
 					xDictRes[(s_id, n_id, t)] = \
 						util_funs['opt'](xDen[(s_id, n_id, t)])
-		# mOpt.addVar(lb=0, ub=1, name='x[{}][{}]({})'.format(s_id, n_id, t))
 		
 		for s_id in swarm_ids:
 			for n_id in node_ids:
@@ -372,14 +695,30 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 
 def create_minlp_gurobi(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
 						cost_fun=None, solve=True, timeLimit=5, n_thread=0, verbose=False):
+	""" Solve the probabilistic swarm control under GTL constraints using the nonconvex solver GUROBI.
+		:param milp_expr : A mixed integer representation of the GTL constraints
+		:param lG : The labelled graph
+		:param Kp : The loop time horizon
+		:param init_den_lb : The lower bound on the density distribution at time 0
+		:param init_den_ub : The upper bound on the density distribution at time 0
+		:param cost_fun : The cost function to minimize
+		:param solve : Specify if the problem must be solve or not
+		:param timeLimit : Specify the time limit of the solver
+		:param n_thread : SPecify the maximum number of thread to be used by the solver
+		:param verbose : Output specificities when solving
+	"""
 	# Create the Gurobi model
 	mOpt = gp.Model('Bilinear MINLP formulation through GUROBI')
 	mOpt.Params.OutputFlag = verbose
 	mOpt.Params.NonConvex = 2
 	mOpt.Params.Threads = n_thread
 	mOpt.Params.TimeLimit = timeLimit
+
+	# Define the function to set the cost function of the optimization problem
 	def set_cost(cVal, xDen, mD, sids, nids):
 		mOpt.setObjective(cVal, gp.GRB.MINIMIZE)
+
+	# Define a function to solve the problem and return the correct status
 	def solve_f():
 		c_time = time.time()
 		mOpt.optimize()
@@ -390,9 +729,12 @@ def create_minlp_gurobi(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 			return mOpt.objVal, -1, dur
 		else:
 			return -np.inf, 0, dur
+
+	# Function to return the value of an optimization variable
 	def ret_sol(solV):
 		return solV.x
 
+	# Save all these function to be used when creating the problem and solving it
 	util_funs = dict()
 	util_funs['r'] = lambda name, lb=0, ub=1 : mOpt.addVar(lb=lb, ub=ub, name=name)
 	util_funs['b'] = lambda name : mOpt.addVar(vtype=gp.GRB.BINARY, name=name)
@@ -400,81 +742,38 @@ def create_minlp_gurobi(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 	util_funs['solve'] = solve_f
 	util_funs['cost'] = set_cost
 	util_funs['opt'] = ret_sol
+
 	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub, 
-								addBilinear=True, cost_fun=cost_fun, solve=solve)
-	# mOpt.update()
-	# mOpt.display()
+								cost_fun=cost_fun, solve=solve)
 
-def create_gtl_proco(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
-					cost_fun=None, solve=True, 
-					maxIter=20, epsTol=1e-5, lamda=10, devM=0.5, rho0=1e-5, 
-					rho1=0.25, rho2=0.7, alpha=2.0, beta=3.5,
-					timeLimit=5, n_thread=0, verbose=True, autotune=True):
-	# Create the Gurobi model,
-	mOpt = gp.Model('Sequential MILP solving through GUROBI')
-	# mOpt.Params.OutputFlag = True
-
-	# Actual cost 
-	costVal = None
-	dictConstr = dict()
-	dictSlack = dict()
-	xD = None
-	MarM = None
-	n_ids, s_ids = None, None
-	def set_cost(cVal, xDen, mD, sids, nids):
-		nonlocal costVal, dictSlack, dictConstr, xD, MarM, n_ids, s_ids
-		n_ids = nids
-		s_ids = sids
-		costVal = cVal
-		xD = xDen
-		MarM = mD
-		# Create the linearized constraints
-		create_linearize_constr(mOpt, xD, MarM, dictSlack, dictConstr, s_ids, Kp, n_ids)
-		# Add the penalized cost functions
-		penList = list()
-		for s_id in s_ids:
-			for t in range(Kp):
-				for n_id in n_ids:
-					penList.append(dictSlack[(s_id, -n_id-1,t)])
-		pen_cost = costVal + lamda * sum(penList)
-		mOpt.setObjective(pen_cost, gp.GRB.MINIMIZE)
-		mOpt.update()
-		# mOpt.display()
-
-	def solve_f():
-		status, dur = sequential_optimization(mOpt, cost_fun, xD, MarM, dictConstr, s_ids, Kp, n_ids,
-						maxIter=maxIter, epsTol=epsTol, lamda=lamda, devM=devM, rho0=rho0, 
-						rho1=rho1, rho2=rho2, alpha=alpha, beta=beta,
-						timeLimit=timeLimit, n_thread=n_thread, verbose=verbose, autotune=autotune)
-		if status == 0:
-			return -np.inf, status, dur
-		return costVal.getValue() if not (isinstance(costVal, int) or isinstance(costVal, float)) else costVal, status, dur
-
-	def ret_sol(solV):
-		return solV.x
-
-	util_funs = dict()
-	util_funs['r'] = lambda name, lb=0, ub=1 : mOpt.addVar(lb=lb, ub=ub, name=name)
-	util_funs['b'] = lambda name : mOpt.addVar(vtype=gp.GRB.BINARY, name=name)
-	util_funs['constr'] = lambda constr : mOpt.addConstr(constr)
-	util_funs['solve'] = solve_f
-	util_funs['cost'] = set_cost
-	util_funs['opt'] = ret_sol
-	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub, 
-								addBilinear=False, cost_fun=cost_fun, solve=solve)
-	# mOpt.update()
-	# mOpt.display()
 
 def create_minlp_scip(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 						cost_fun=None, solve=True,
 						timeLimit=5, n_thread=0, verbose=False):
+	""" Solve the probabilistic swarm control under GTL constraints using the nonconvex solver SCIP
+		:param milp_expr : A mixed integer representation of the GTL constraints
+		:param lG : The labelled graph
+		:param Kp : The loop time horizon
+		:param init_den_lb : The lower bound on the density distribution at time 0
+		:param init_den_ub : The upper bound on the density distribution at time 0
+		:param cost_fun : The cost function to minimize
+		:param solve : Specify if the problem must be solve or not
+		:param timeLimit : Specify the time limit of the solver
+		:param n_thread : SPecify the maximum number of thread to be used by the solver
+		:param verbose : Output specificities when solving
+	"""
+	# Import and set up the solver
 	import pyscipopt as pSCIP
+	# Create the optimization problem instance
 	mOpt = pSCIP.Model('Bilinear MINLP formulation through SCIP')
 	mOpt.hideOutput(quiet = (not verbose))
 	mOpt.setParam('limits/time', timeLimit)
-	# mOpt.setParam('')
+
+	# Define the cost function
 	def set_cost(cVal, xDen, mD, sids, nids):
 		mOpt.setObjective(cVal, "minimize")
+
+	# Define the function to solve the problem
 	def solve_f():
 		c_time = time.time()
 		mOpt.optimize()
@@ -485,8 +784,12 @@ def create_minlp_scip(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 			return mOpt.getObjVal(), -1, dur
 		else:
 			return -np.inf, 0, dur
+
+	# Define the function to return the value of each variable
 	def ret_sol(solV):
 		return mOpt.getVal(solV)
+
+	# Set up the parameters
 	util_funs = dict()
 	util_funs['r'] = lambda name, lb=0, ub=1 : mOpt.addVar(lb=lb, ub=ub, name=name)
 	util_funs['b'] = lambda name : mOpt.addVar(vtype="B", name=name)
@@ -494,14 +797,28 @@ def create_minlp_scip(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 	util_funs['solve'] = solve_f
 	util_funs['cost'] = set_cost
 	util_funs['opt'] = ret_sol
+
 	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub,
-								 addBilinear=True, cost_fun=cost_fun, solve=solve)
-	# mOpt.writeProblem('model')
+								cost_fun=cost_fun, solve=solve)
 
 def create_minlp_pyomo(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
 			cost_fun=None, solve=True, 
 			solver='couenne', solverPath='/home/fdjeumou/Documents/non_convex_solver/',
 			timeLimit=5, n_thread=0, verbose=False):
+	""" Solve the probabilistic swarm control under GTL constraints using the python interface pyomo to bonmin, couenne, ipopt
+		:param milp_expr : A mixed integer representation of the GTL constraints
+		:param lG : The labelled graph
+		:param Kp : The loop time horizon
+		:param init_den_lb : The lower bound on the density distribution at time 0
+		:param init_den_ub : The upper bound on the density distribution at time 0
+		:param cost_fun : The cost function to minimize
+		:param solve : Specify if the problem must be solve or not
+		:param solver : Specify the solver to use 
+		:param solverPath : Specify the path of the solver to use
+		:param timeLimit : Specify the time limit of the solver
+		:param n_thread : SPecify the maximum number of thread to be used by the solver
+		:param verbose : Output specificities when solving
+	"""
 	from pyomo.environ import Var, ConcreteModel, Constraint, NonNegativeReals, Binary, SolverFactory
 	from pyomo.environ import Objective, minimize
 	import pyutilib
@@ -509,24 +826,28 @@ def create_minlp_pyomo(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 
 	mOpt = ConcreteModel('Bilinear MINLP formulation through PYOMO')
 
-	# Function to return real values
+	# Function to return real values variable
 	def r_values(name, lb=0, ub=1):
 		setattr(mOpt, name, Var(bounds=(lb,ub), within=NonNegativeReals))
 		return getattr(mOpt, name)
 
+	# Function to return binary variables
 	def b_values(name):
 		setattr(mOpt, name, Var(within=Binary))
 		return getattr(mOpt, name)
 
+	# Function to add constraints
 	nbConstr = 0
 	def constr(val):
 		nonlocal nbConstr
 		setattr(mOpt, 'C_{}'.format(nbConstr), Constraint(expr = val))
 		nbConstr+=1
 
+	# FUnction to set the cost to optimize
 	def set_cost(cVal, xDen, mD, sids, nids):
 		setattr(mOpt, 'objective', Objective(expr=cVal, sense=minimize))
 
+	# Function to solve the optimization problem
 	def solve_f():
 		solverOpt = SolverFactory(solver, executable=solverPath+solver)
 		try:
@@ -540,6 +861,7 @@ def create_minlp_pyomo(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 		except pyutilib.common.ApplicationError:
 			return -np.inf, -1, timeLimit
 
+	# Function to return the value of an optimization variable
 	def ret_sol(solV):
 		return solV.value
 
@@ -552,13 +874,22 @@ def create_minlp_pyomo(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 	util_funs['cost'] = set_cost
 	util_funs['opt'] = ret_sol
 	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub,
-								addBilinear=True, cost_fun=cost_fun, solve=solve)
-	# mOpt.pprint()
+							cost_fun=cost_fun, solve=solve)
 
 def create_reach_avoid_problem_lp(gtlFormulas, nodes, desDens, lG, cost_fun=None, cost_M = None, 
 					solve=True, timeLimit=5, n_thread=0, verbose=False):
-	""" Compute a solution of the LP problem (34) to (41). A solution of such a problem
+	""" Compute a solution of the reach-avoid LP problem using GUROBI. A solution of such a problem
 		provides a Markov Matrix that ensures the satisfcation of reach-avoid specifications
+		:param gtlFormulas : The safe-avoid GTL formulas to satisfy
+		:param nodes : The set of nodes corresponding to each GTL formula to satisfy
+		:param desDens : The desired density to reach (reach specifications)
+		:param lG : The labelled graph
+		:param cost_fun : The cost function to optimize
+		:param cost_M : A dictionary given the weight for each ergocity coefficient for each swarm
+		:param solve : Specify if the problem has to be solved
+		:param timeLimit : Specify the time limit of the solver
+		:param n_thread : SPecify the maximum number of thread to be used by the solver
+		:param verbose : Output specificities when solving
 	"""
 
 	# Create the optimization problem
@@ -630,16 +961,13 @@ def create_reach_avoid_problem_lp(gtlFormulas, nodes, desDens, lG, cost_fun=None
 			sum(dictS[(i,j)] for j in range(len(swarm_ids)))
 			>= -b[i]
 		)
-
+	# Add the second dual constraint
 	for i in range(b.shape[0]):
 		for j in range(A.shape[1]):
 			t1 = sum( dictY[(i,k)]*A[k,j] for k in range(b.shape[0]))
 			t2 = sum( dictS[(i,k)]*dictO.get((k,j), 0) for k in range(len(swarm_ids)) )
 			t3 = sum( A[i,k]*diagMDict.get((k,j), 0) for k in range(A.shape[1]))
 			mOpt.addConstr(t1 + t2 <= - t3)
-
-	# mOpt.update()
-	# mOpt.display()
 
 	# Build the cost function
 	costVal = 0
@@ -673,7 +1001,7 @@ def create_reach_avoid_problem_lp(gtlFormulas, nodes, desDens, lG, cost_fun=None
 
 	optCost, status, solveTime = -np.inf, -1, 0
 
-	# Optimize of required
+	# Optimize if it is required
 	if solve:
 		c_t = time.time()
 		mOpt.optimize()
@@ -697,8 +1025,19 @@ def create_reach_avoid_problem_lp(gtlFormulas, nodes, desDens, lG, cost_fun=None
 
 def create_reach_avoid_problem_convex(gtlFormulas, nodes, desDens, lG, cost_fun=None, cost_M = None, 
 					solve=True, timeLimit=5, n_thread=0, verbose=False, sdp_solver=True):
-	""" Compute a solution of the LP problem (34) to (41). A solution of such a problem
-		provides a Markov Matrix that ensures the satisfcation of reach-avoid specifications
+	""" Compute a solution of the LP problem when there's scrambling patter and the more general SDP problem when there's no scrambling pattern. 
+		A solution of such a problem provides a Markov Matrix that ensures the satisfcation of reach-avoid specifications
+		:param gtlFormulas : The safe-avoid GTL formulas to satisfy
+		:param nodes : The set of nodes corresponding to each GTL formula to satisfy
+		:param desDens : The desired density to reach (reach specifications)
+		:param lG : The labelled graph
+		:param cost_fun : The cost function to optimize
+		:param cost_M : A dictionary given the weight for each ergocity coefficient for each swarm
+		:param solve : Specify if the problem has to be solved
+		:param timeLimit : Specify the time limit of the solver
+		:param n_thread : SPecify the maximum number of thread to be used by the solver
+		:param verbose : Output specificities when solving
+		:param sdp_solver : Use the SDP solver instead of relying on the ergocity coefficient
 	"""
 
 	# Swarm and graph configuration information
@@ -827,94 +1166,108 @@ def create_reach_avoid_problem_convex(gtlFormulas, nodes, desDens, lG, cost_fun=
 	return optCost, status, solveTime, MDictRes
 
 if __name__ == "__main__":
-    """
-    Example of utilization of this class
-    """
-    V = set({1, 2, 3})
-    lG = LabelledGraph(V)
+	"""
+	Example of utilization of this class
+	"""
+	V = set({1, 2, 3})
+	lG = LabelledGraph(V)
 
-    # Add the subswarm with id 1
-    lG.addSubswarm(0, [(1,2), (2,3), (2,1), (3,2)])
+	# Add the subswarm with id 0
+	lG.addSubswarm(0, [(1,2), (2,3), (2,1), (3,2)])
 
-    # Add the subswarm with id 1
-    lG.addSubswarm(1, [(1,2), (2,3), (2,1), (3,2)])
+	# Add the subswarm with id 1
+	lG.addSubswarm(1, [(1,2), (2,3), (2,1), (3,2)])
 
-    # Get the density symbolic representation for defining the node labels
-    x = lG.getRprDensity()
+	# Get the density symbolic representation for defining the node labels
+	x = lG.getRprDensity()
 
-    # Now add some node label on the graph
-    lG.addNodeLabel(1, x[(0,1)] + x[(0,2)])
-    lG.addNodeLabel(2, x[(0,1)] + x[(1,1)])
-    lG.addNodeLabel(3, [x[(0,1)] + x[(0,2)], x[(0,3)] - x[(1,2)]])
+	# Now add some node label on the graph
+	lG.addNodeLabel(1, x[(0,1)] + x[(0,2)])
+	lG.addNodeLabel(2, x[(0,1)] + x[(1,1)])
+	lG.addNodeLabel(3, [x[(0,1)] + x[(0,2)], x[(0,3)] - x[(1,2)]])
 
-    Kp = 15
-    piV3 = AtomicGTL([0.5, 0.25])
-    piV1 = AtomicGTL([0.5])
-    formula1 = AlwaysEventuallyGTL(piV3)
-    formula2 = AlwaysGTL(piV1)
-    m_milp = create_milp_constraints([formula1, formula2], [3, 1], Kp, lG, initTime=0)
+	Kp = 3
+	piV3 = AtomicGTL([0.5, 0.25])
+	piV1 = AtomicGTL([0.5])
+	formula1 = AlwaysEventuallyGTL(piV3)
+	formula2 = AlwaysGTL(piV1)
+	m_milp = create_milp_constraints([formula1, formula2], [3, 1], Kp, lG, initTime=0)
 
-    def cost_fun(xDict, MDict, swarm_ids, node_ids):
-    	costValue = 0
-    	for s_id in swarm_ids:
-    		for n_id in node_ids:
-    			for m_id in node_ids:
-    				costValue += MDict[(s_id, n_id, m_id)]
-    	return costValue
-    cost_fun = None
-    # print_milp_repr([piV3], [3], Kp, lG, initTime=0)
+	def cost_fun(xDict, MDict, swarm_ids, node_ids):
+		costValue = 0
+		for s_id in swarm_ids:
+			for n_id in node_ids:
+				for m_id in node_ids:
+					costValue += MDict[(s_id, n_id, m_id)]
+		return costValue
+	cost_fun = None
+	# print_milp_repr([piV3], [3], Kp, lG, initTime=0)
 
-    optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
-    						create_minlp_gurobi(m_milp, lG, Kp, cost_fun=cost_fun,
-    						timeLimit=5, n_thread=1, verbose=False)
-    print(ljRes)
-    print(optCost, status, solveTime)
-    maxDiff = 0
-    for s_id in swarm_ids:
-    	for n_id in node_ids:
-    		for t in range(Kp):
-    			s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
-    			# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
-    			maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
-    print(maxDiff)
+	optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
+							create_minlp_gurobi(m_milp, lG, Kp, cost_fun=cost_fun,
+							timeLimit=5, n_thread=0, verbose=True)
+	print('-------------------------------------------')
+	print(ljRes)
+	print(optCost, status, solveTime)
+	# Compute and print the accuracy of the bilinear constraint
+	maxDiff = 0
+	for s_id in swarm_ids:
+		for n_id in node_ids:
+			for t in range(Kp):
+				s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
+				# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+				maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+	print('Accuracy bilinear constraint : ', maxDiff)
+	print('-------------------------------------------')
 
-    # create_minlp_scip(m_milp, lG, Kp)
-    optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
-    								create_minlp_scip(m_milp, lG, Kp, cost_fun=cost_fun,
-    									timeLimit=5, n_thread=0, verbose=False)
-    print(ljRes)
-    print(optCost, status, solveTime)
-    maxDiff = 0
-    for s_id in swarm_ids:
-    	for n_id in node_ids:
-    		for t in range(Kp):
-    			s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
-    			# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
-    			maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
-    print(maxDiff)
-    # print(xDictRes)
+	# create_minlp_scip(m_milp, lG, Kp)
+	optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
+									create_minlp_scip(m_milp, lG, Kp, cost_fun=cost_fun,
+										timeLimit=5, n_thread=0, verbose=True)
+	print('-------------------------------------------')
+	print(ljRes)
+	print(optCost, status, solveTime)
+	# Compute and print the accuracy of the bilinear constraint
+	maxDiff = 0
+	for s_id in swarm_ids:
+		for n_id in node_ids:
+			for t in range(Kp):
+				s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
+				# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+				maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+	print('Accuracy bilinear constraint : ', maxDiff)
+	print('-------------------------------------------')
 
-    # create_minlp_pyomo(m_milp, lG, Kp)
-    optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
-    								create_minlp_pyomo(m_milp, lG, Kp,cost_fun=cost_fun,
-    								timeLimit=5, n_thread=0, verbose=False)
-    print(ljRes)
-    print(optCost, status, solveTime)
-    # print(xDictRes)
-    # print(optCost)
+	optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = gtlproco_scp(m_milp, lG, Kp, 
+		cost_fun=cost_fun, maxIter=100, verbose=True, verbose_solver=False, costTol=1e-6, bilTol=1e-6, mu_lin=1e1, mu_period=1)
+	print('-------------------------------------------')
+	print(ljRes)
+	print(optCost, status, solveTime)
+	# Compute and print the accuracy of the bilinear constraint
+	maxDiff = 0
+	for s_id in swarm_ids:
+		for n_id in node_ids:
+			for t in range(Kp):
+				s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
+				# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+				maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+	print('Accuracy bilinear constraint : ', maxDiff)
+	print('-------------------------------------------')
 
-    optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
-    		create_gtl_proco(m_milp, lG, Kp, cost_fun=cost_fun, solve=True, 
-					maxIter=20, epsTol=1e-5, lamda=100, devM=0.5, rho0=1e-2, 
-					rho1=0.75, rho2=0.95, alpha=2.0, beta=1.5,
-					timeLimit=5, n_thread=1, verbose=False, autotune=False)
-    print(ljRes)
-    print(optCost, status, solveTime)
-    maxDiff = 0
-    for s_id in swarm_ids:
-    	for n_id in node_ids:
-    		for t in range(Kp):
-    			s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
-    			# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
-    			maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
-    print(maxDiff)
+	# create_minlp_pyomo(m_milp, lG, Kp)
+	optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
+									create_minlp_pyomo(m_milp, lG, Kp,cost_fun=cost_fun,
+									timeLimit=5, n_thread=0, verbose=True)
+	print('-------------------------------------------')
+	print(ljRes)
+	print(optCost, status, solveTime)
+	# Compute and print the accuracy of the bilinear constraint
+	maxDiff = 0
+	for s_id in swarm_ids:
+		for n_id in node_ids:
+			for t in range(Kp):
+				s = sum(MDictRes[(s_id, n_id, m_id, t)]*xDictRes[(s_id, m_id,t)] for m_id in node_ids)
+				# print(np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+				maxDiff = np.maximum(maxDiff, np.abs(xDictRes[(s_id, n_id,t+1)]-s))
+	print('Accuracy bilinear constraint : ', maxDiff)
+	print('-------------------------------------------')
