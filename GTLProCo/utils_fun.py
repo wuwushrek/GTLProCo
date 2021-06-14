@@ -127,7 +127,7 @@ if __name__ == "__main__":
 
 	# np.random.seed(401)
 	nNode = 30
-	nEdge = np.random.randint(2, 3)
+	nEdge = np.random.randint(2, 5)
 	Kp = 10
 	lG, gtl, nodes, safeGTL, initPoint, desPoint = \
 		create_random_graph_and_reach_avoid_spec(nNode, nEdge, scrambling=True)
@@ -147,7 +147,7 @@ if __name__ == "__main__":
 	# Use GUROBI Bilinear solver
 	optCost, status, solveTime, xDictRes, MdictRes, ljRes, swarm_ids, node_ids = \
 		create_minlp_gurobi(m_milp, lG, Kp, initPoint, initPoint, 
-			cost_fun=cost_fun, timeLimit=50, n_thread=0, verbose=True)
+			cost_fun=cost_fun, timeLimit=200, n_thread=0, verbose=True)
 	print('-------------------------------------------')
 	print(ljRes)
 	print(optCost, status, solveTime)
@@ -162,8 +162,8 @@ if __name__ == "__main__":
 	print('-------------------------------------------')
 
 	optCost, status, solveTime, xDictRes, MdictRes, ljRes, swarm_ids, node_ids = gtlproco_scp(m_milp, lG, Kp, 
-    	initPoint, initPoint, cost_fun=cost_fun, timeLimit=50, n_thread=0, verbose=True, verbose_solver=False,
-    		costTol=1e-6, bilTol=1e-6, maxIter=100, mu_lin=1e1, mu_period=1)
+    	initPoint, initPoint, cost_fun=cost_fun, timeLimit=200, n_thread=0, verbose=True, verbose_solver=False,
+    		costTol=1e-4, bilTol=1e-6, maxIter=100, mu_lin=1e1, mu_period=1)
 	print('-------------------------------------------')
 	print(ljRes)
 	print(optCost, status, solveTime)

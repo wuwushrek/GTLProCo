@@ -429,7 +429,8 @@ def gtlproco_scp(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 	# Solving parameters and status
 	solve_time = sTime1 + sTime2
 	status = -1
-	optCost = 0
+	optCost = get_cost_function(cost_fun, dictXk, dictMk, swarm_ids, Kp, node_ids) + sum([mu_period*(ind[0]+1)*dictXk[ind] for ind in lVars])
+	attainedCost = optCost
 
 	for i in range(maxIter):
 
@@ -440,6 +441,12 @@ def gtlproco_scp(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 
 		# Update the optimization problem and solve it
 		update_linearized_problem_scp(linProb, xLin, Mlin, linConstr, rk, dictConstrVar, dictConstrL1, dictXk, dictMk, node_ids)
+
+		# Update the starting point of the linearized problem
+		for kVal, xVal in xLin.items():
+			xVal.start = dictXk[kVal]
+		for kVal, Mval in Mlin.items():
+			Mval.start = dictMk[kVal]
 
 		# Measure optimization time
 		cur_t = time.time()
@@ -466,8 +473,8 @@ def gtlproco_scp(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 		finish_bil = x1diffbil <= bilTol*len(node_ids)*Kp*len(swarm_ids) or xdiffbil <= bilTol*len(node_ids)*Kp*len(swarm_ids)
 
 		diffLin = np.linalg.norm(truef-linf, 1)
-		noImprov = (i > 0) and (np.abs(linProb.objVal-attainedCost) < costTol) and finish_bil
-		actualCost  = get_cost_function(cost_fun, dictXk1, dictMk1, swarm_ids, Kp, node_ids)
+		noImprov = (i >= 0) and (np.abs(linProb.objVal-attainedCost) < costTol) and finish_bil
+		actualCost  = get_cost_function(cost_fun, dictXk1, dictMk1, swarm_ids, Kp, node_ids) + sum([mu_period*(ind[0]+1)*dictXk1[ind] for ind in lVars])
 		attainedCost = linProb.objVal
 
 		# The trust region expander and contractor coefficient are dependent on the accuracy of the bilinear constraint
@@ -493,16 +500,16 @@ def gtlproco_scp(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 			print('[Iteration {}] : Trust region = {}, actual Cost = {}, attained Cost = {}, Lin Error = {}, Solve Time = {}'.format(
 					i, rk, actualCost, attainedCost, diffLin, solve_time))
 
-		# If the trust region value is below the threshold
-		if rk < trust_lim:
-			if verbose:
-				print('[Iteration {}] : Minimum trust region reached'.format(i))
-			break
-
 		# If the solution does not improve
 		if noImprov:
 			if verbose:
 				print('[Iteration {}] : No improvement in the solution'.format(i))
+			break
+
+		# If the trust region value is below the threshold
+		if rk < trust_lim:
+			if verbose:
+				print('[Iteration {}] : Minimum trust region reached'.format(i))
 			break
 			
 	return optCost, status, solve_time, dictXk, dictMk, ljRes, swarm_ids, node_ids
@@ -581,7 +588,7 @@ def get_cost_function(cost_fun, xDen, MarkovM, swam_ids, Kp, node_ids):
 
 
 def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
-							cost_fun=None, solve=False):
+							cost_fun=None, solve=False, mu_period=1):
 	""" Generic function to create and solve the bilinear optimization problem.
 		This function can be used to solve the MINLP using Gurobi, SCIP, Pyomo, Bonmin etc...
 		:param util_funs : Solver specific function to create continuous/binary variables, create constraints,
@@ -593,6 +600,7 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 		:param init_den_ub : The upper bound on the density distribution at time 0
 		:param cost_fun : The cost function to minimize
 		:param solve : Specify if the problem must be solved or not
+		:param mu_period : A penalization term for looping early than Kp
 	"""
 	# Obtain the milp encoding
 	(newCoeffs, newVars, rhsVals, nVar), (lCoeffs, lVars, lRHS) = milp_expr
@@ -660,7 +668,7 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 		util_funs['constr'](constr)
 
 	# Compute the cost function if given by the user
-	costVal = get_cost_function(cost_fun, xDen, MarkovM, swarm_ids, Kp, node_ids)
+	costVal = get_cost_function(cost_fun, xDen, MarkovM, swarm_ids, Kp, node_ids) + sum([mu_period*(ind[0]+1)*xDen[ind] for ind in lVars])
 
 	# Set the cost function in the optimization problem
 	util_funs['cost'](costVal, xDen, MarkovM, swarm_ids, node_ids)
@@ -694,7 +702,7 @@ def create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb=None, init_den_
 
 
 def create_minlp_gurobi(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
-						cost_fun=None, solve=True, timeLimit=5, n_thread=0, verbose=False):
+						cost_fun=None, solve=True, timeLimit=5, n_thread=0, verbose=False, mu_period=1):
 	""" Solve the probabilistic swarm control under GTL constraints using the nonconvex solver GUROBI.
 		:param milp_expr : A mixed integer representation of the GTL constraints
 		:param lG : The labelled graph
@@ -706,6 +714,7 @@ def create_minlp_gurobi(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 		:param timeLimit : Specify the time limit of the solver
 		:param n_thread : SPecify the maximum number of thread to be used by the solver
 		:param verbose : Output specificities when solving
+		:param mu_period : A penalization term for looping early than Kp
 	"""
 	# Create the Gurobi model
 	mOpt = gp.Model('Bilinear MINLP formulation through GUROBI')
@@ -744,12 +753,12 @@ def create_minlp_gurobi(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 	util_funs['opt'] = ret_sol
 
 	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub, 
-								cost_fun=cost_fun, solve=solve)
+								cost_fun=cost_fun, solve=solve, mu_period=mu_period)
 
 
 def create_minlp_scip(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 						cost_fun=None, solve=True,
-						timeLimit=5, n_thread=0, verbose=False):
+						timeLimit=5, n_thread=0, verbose=False, mu_period=1):
 	""" Solve the probabilistic swarm control under GTL constraints using the nonconvex solver SCIP
 		:param milp_expr : A mixed integer representation of the GTL constraints
 		:param lG : The labelled graph
@@ -761,6 +770,7 @@ def create_minlp_scip(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 		:param timeLimit : Specify the time limit of the solver
 		:param n_thread : SPecify the maximum number of thread to be used by the solver
 		:param verbose : Output specificities when solving
+		:param mu_period : A penalization term for looping early than Kp
 	"""
 	# Import and set up the solver
 	import pyscipopt as pSCIP
@@ -799,12 +809,12 @@ def create_minlp_scip(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 	util_funs['opt'] = ret_sol
 
 	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub,
-								cost_fun=cost_fun, solve=solve)
+								cost_fun=cost_fun, solve=solve, mu_period=1)
 
 def create_minlp_pyomo(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None, 
 			cost_fun=None, solve=True, 
 			solver='couenne', solverPath='/home/fdjeumou/Documents/non_convex_solver/',
-			timeLimit=5, n_thread=0, verbose=False):
+			timeLimit=5, n_thread=0, verbose=False, mu_period=1):
 	""" Solve the probabilistic swarm control under GTL constraints using the python interface pyomo to bonmin, couenne, ipopt
 		:param milp_expr : A mixed integer representation of the GTL constraints
 		:param lG : The labelled graph
@@ -818,6 +828,7 @@ def create_minlp_pyomo(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 		:param timeLimit : Specify the time limit of the solver
 		:param n_thread : SPecify the maximum number of thread to be used by the solver
 		:param verbose : Output specificities when solving
+		:param mu_period : A penalization term for looping early than Kp
 	"""
 	from pyomo.environ import Var, ConcreteModel, Constraint, NonNegativeReals, Binary, SolverFactory
 	from pyomo.environ import Objective, minimize
@@ -874,7 +885,7 @@ def create_minlp_pyomo(milp_expr, lG, Kp, init_den_lb=None, init_den_ub=None,
 	util_funs['cost'] = set_cost
 	util_funs['opt'] = ret_sol
 	return create_minlp_model(util_funs, milp_expr, lG, Kp, init_den_lb, init_den_ub,
-							cost_fun=cost_fun, solve=solve)
+							cost_fun=cost_fun, solve=solve, mu_period=1)
 
 def create_reach_avoid_problem_lp(gtlFormulas, nodes, desDens, lG, cost_fun=None, cost_M = None, 
 					solve=True, timeLimit=5, n_thread=0, verbose=False):
@@ -1205,7 +1216,7 @@ if __name__ == "__main__":
 
 	optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
 							create_minlp_gurobi(m_milp, lG, Kp, cost_fun=cost_fun,
-							timeLimit=5, n_thread=0, verbose=True)
+							timeLimit=5, n_thread=0, verbose=True, mu_period=1)
 	print('-------------------------------------------')
 	print(ljRes)
 	print(optCost, status, solveTime)
@@ -1223,7 +1234,7 @@ if __name__ == "__main__":
 	# create_minlp_scip(m_milp, lG, Kp)
 	optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
 									create_minlp_scip(m_milp, lG, Kp, cost_fun=cost_fun,
-										timeLimit=5, n_thread=0, verbose=True)
+										timeLimit=5, n_thread=0, verbose=True, mu_period=1)
 	print('-------------------------------------------')
 	print(ljRes)
 	print(optCost, status, solveTime)
@@ -1239,7 +1250,7 @@ if __name__ == "__main__":
 	print('-------------------------------------------')
 
 	optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = gtlproco_scp(m_milp, lG, Kp, 
-		cost_fun=cost_fun, maxIter=100, verbose=True, verbose_solver=False, costTol=1e-6, bilTol=1e-6, mu_lin=1e1, mu_period=1)
+		cost_fun=cost_fun, maxIter=100, verbose=True, verbose_solver=False, costTol=1e-4, bilTol=1e-6, mu_lin=1e1, mu_period=1)
 	print('-------------------------------------------')
 	print(ljRes)
 	print(optCost, status, solveTime)
@@ -1257,7 +1268,7 @@ if __name__ == "__main__":
 	# create_minlp_pyomo(m_milp, lG, Kp)
 	optCost, status, solveTime, xDictRes, MDictRes, ljRes, swarm_ids, node_ids = \
 									create_minlp_pyomo(m_milp, lG, Kp,cost_fun=cost_fun,
-									timeLimit=5, n_thread=0, verbose=True)
+									timeLimit=5, n_thread=0, verbose=True, mu_period=1)
 	print('-------------------------------------------')
 	print(ljRes)
 	print(optCost, status, solveTime)
