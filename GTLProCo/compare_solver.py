@@ -13,7 +13,7 @@ from .gtlproco import create_reach_avoid_problem_convex
 from .gtlproco import create_reach_avoid_problem_lp
 
 # Save the path for the non convex solver of pyomo
-pyomo_path = "/home/fdjeumou/Documents/non_convex_solver/"
+pyomo_path = "/home/franckd/GTLProCo/minlp_solver/"
 
 def solve_problem(solver_name, pb_infos):
 	global pyomo_path
@@ -26,7 +26,7 @@ def solve_problem(solver_name, pb_infos):
 	if solver_name == 'GTLProco':
 		optCost, status, solveTime, xDictRes, MdictRes, ljRes, swarm_ids, node_ids = \
 				create_gtl_proco(m_milp, lG, Kp, initPoint, initPoint, cost_fun=costF,
-						solve=True, maxIter=200, epsTol=1e-5, lamda=1, devM=1, rho0=1e-3, 
+						solve=True, maxIter=200, epsTol=1e-4, lamda=1, devM=1, rho0=1e-3, 
 						rho1=0.75, rho2=0.95, alpha=3.0, beta=3,
 						timeLimit=timeL, n_thread=n_thread, verbose=verb, autotune=False
 				)
@@ -77,14 +77,18 @@ def solve_problem(solver_name, pb_infos):
 	return np.array([len(node_ids), status, optCost, solveTime, maxDiff]).reshape(1,-1)
 
 # Set seed for reproductibility
-np.random.seed(401)
+# np.random.seed(101)
 solverList = ['GTLProco', 'GTLProco_SDP', 'GTLProco_LP', 'Gurobi_MINLP', 'SCIP', 'couenne', 'bonmin']
-maxPS = 151
+maxPS = 101
 sizeProblem = [ i for i in range(5, maxPS, 5)]
-timeHorizon = [ np.maximum(10 + int(i/10.0),20) for i in range(5, maxPS, 5)]
-nbTry = 20
+timeHorizon = [ np.maximum(5 + int(i/10.0),15) for i in range(5, maxPS, 5)]
+nbTry = 5
 
-save_dir = 'exp_results'
+import sys
+
+save_dir = sys.argv[1]
+print('File name: ', save_dir)
+
 dictRes = dict()
 
 for _ in range(nbTry):
